@@ -76,3 +76,4 @@ backend/__pycache__/
 # Uploaded files
 backend/uploads/*
 !backend/uploads/.gitkeep
+.vercel
