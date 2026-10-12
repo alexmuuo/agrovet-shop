@@ -1,4 +1,3 @@
-
 import os
 import logging
 
@@ -14,7 +13,10 @@ from extensions import db
 # LOAD ENVIRONMENT VARIABLES
 # --------------------------------------------------
 
-load_dotenv()
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+ENV_FILE = os.path.join(BASE_DIR, ".env")
+
+load_dotenv(ENV_FILE)
 
 
 # --------------------------------------------------
@@ -28,11 +30,24 @@ app = Flask(__name__)
 # APPLICATION CONFIGURATION
 # --------------------------------------------------
 
-app.config["SQLALCHEMY_DATABASE_URI"] = os.getenv("DATABASE_URL")
-app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+DATABASE_URL = os.getenv("DATABASE_URL")
 
-if not app.config["SQLALCHEMY_DATABASE_URI"]:
-    raise RuntimeError("DATABASE_URL is not configured.")
+if not DATABASE_URL:
+    raise RuntimeError(
+        "DATABASE_URL is not configured. "
+        "Check the backend .env file or server environment variables."
+    )
+
+# Normalize older PostgreSQL URL formats.
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace(
+        "postgres://",
+        "postgresql://",
+        1
+    )
+
+app.config["SQLALCHEMY_DATABASE_URI"] = DATABASE_URL
+app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 
 
 # --------------------------------------------------
@@ -55,14 +70,12 @@ app.config["MAIL_USE_TLS"] = (
 app.config["MAIL_USE_SSL"] = False
 
 app.config["MAIL_USERNAME"] = os.getenv("MAIL_USERNAME")
-
 app.config["MAIL_PASSWORD"] = os.getenv("MAIL_PASSWORD")
 
 app.config["MAIL_DEFAULT_SENDER"] = os.getenv(
     "MAIL_DEFAULT_SENDER"
 )
 
-# Initialize Flask-Mail.
 mail = Mail(app)
 
 
@@ -70,8 +83,8 @@ mail = Mail(app)
 # CORS CONFIGURATION
 # --------------------------------------------------
 
-# Allow requests from the local React/Vite frontend.
-# Add your production frontend origin when deploying.
+# Include your production frontend origins here.
+# Replace the example domains with your actual deployed URLs.
 
 allowed_origins = [
     "http://localhost:5173",
