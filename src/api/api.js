@@ -1,9 +1,15 @@
 import axios from "axios";
 
-const api = axios.create({
-  baseURL: "https://alexagshop.pythonanywhere.com/api",
-});
+// ============================================================
+// API CONFIGURATION — RENDER BACKEND
+// ============================================================
 
+const api = axios.create({
+  baseURL: "https://agrovet-api-a00w.onrender.com/api",
+  headers: {
+    "Content-Type": "application/json",
+  },
+});
 
 // ============================================================
 // REQUEST INTERCEPTOR
@@ -26,21 +32,16 @@ api.interceptors.request.use(
 
     const isAdminRoute = cleanUrl.startsWith("/admin/");
 
-    // Product creation, editing and deletion require admin auth.
+    // Product creation, editing, and deletion require admin auth.
     const isProductMutation =
       /(?:^|\/)products(?:\/|$)/.test(cleanUrl) &&
       ["post", "put", "patch", "delete"].includes(method);
 
     // Creating a cashier requires admin authentication.
     const isCashierCreation =
-      cleanUrl === "/cashier/create" &&
-      method === "post";
+      cleanUrl === "/cashier/create" && method === "post";
 
-    if (
-      isAdminRoute ||
-      isProductMutation ||
-      isCashierCreation
-    ) {
+    if (isAdminRoute || isProductMutation || isCashierCreation) {
       const adminToken = localStorage.getItem("adminToken");
 
       if (adminToken) {
@@ -52,8 +53,7 @@ api.interceptors.request.use(
     // CASHIER AUTHENTICATION
     // ========================================================
 
-    // Cashier login is public, so do not attach a cashier token
-    // to the login request itself.
+    // Cashier login is public; do not attach a cashier token to it.
     const isCashierProtectedEndpoint =
       cleanUrl.startsWith("/cashier/") &&
       cleanUrl !== "/cashier/login" &&
@@ -92,8 +92,7 @@ api.interceptors.request.use(
       !isCashierProtectedEndpoint &&
       !isCashierCreation
     ) {
-      const customerToken =
-        localStorage.getItem("customerToken");
+      const customerToken = localStorage.getItem("customerToken");
 
       if (customerToken) {
         config.headers.Authorization = `Bearer ${customerToken}`;
