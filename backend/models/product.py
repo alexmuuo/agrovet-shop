@@ -2,6 +2,7 @@ from datetime import datetime
 
 from extensions import db
 
+
 class Product(db.Model):
     __tablename__ = "products"
 
@@ -13,6 +14,15 @@ class Product(db.Model):
 
     description = db.Column(db.Text)
 
+    # Cost paid by the business to acquire one unit.
+    # Nullable initially to support products that already exist in the database
+    # and whose historical buying prices are not yet known.
+    buying_price = db.Column(
+        db.Numeric(10, 2),
+        nullable=True,
+    )
+
+    # Existing API field used as the customer-facing selling price.
     price = db.Column(db.Numeric(10, 2), nullable=False)
 
     unit = db.Column(db.String(50), nullable=False)
@@ -25,13 +35,13 @@ class Product(db.Model):
 
     created_at = db.Column(
         db.DateTime,
-        default=datetime.utcnow
+        default=datetime.utcnow,
     )
 
     updated_at = db.Column(
         db.DateTime,
         default=datetime.utcnow,
-        onupdate=datetime.utcnow
+        onupdate=datetime.utcnow,
     )
 
     def to_dict(self):
@@ -40,6 +50,11 @@ class Product(db.Model):
             "name": self.name,
             "category": self.category,
             "description": self.description,
+            "buying_price": (
+                float(self.buying_price)
+                if self.buying_price is not None
+                else None
+            ),
             "price": float(self.price),
             "unit": self.unit,
             "stock": self.stock,

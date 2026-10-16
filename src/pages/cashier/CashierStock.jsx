@@ -1,0 +1,581 @@
+import { useCallback, useEffect, useState } from "react";
+import axios from "axios";
+
+const API_BASE = "http://127.0.0.1:5000/api";
+
+function getAuthHeaders() {
+const token = localStorage.getItem("cashierToken");
+
+return {
+Authorization: `Bearer ${token}`,
+};
+}
+
+function CashierStock() {
+const [products, setProducts] = useState([]);
+const [loading, setLoading] = useState(true);
+const [submitting, setSubmitting] = useState(false);
+const [error, setError] = useState("");
+const [success, setSuccess] = useState("");
+const [lastMovement, setLastMovement] = useState(null);
+
+const [form, setForm] = useState({
+product_id: "",
+quantity: "",
+reference: "",
+notes: "",
+});
+
+const loadProducts = useCallback(async () => {
+setLoading(true);
+setError("");
+
+try {
+  const response = await axios.get(
+    `${API_BASE}/cashier/stock/products`,
+    {
+      headers: getAuthHeaders(),
+    }
+  );
+
+  setProducts(response.data.products || []);
+} catch (err) {
+  setError(
+    err.response?.data?.message ||
+      "Unable to load products. Please check your connection and log in again if necessary."
+  );
+} finally {
+  setLoading(false);
+}
+
+
+}, []);
+
+useEffect(() => {
+loadProducts();
+}, [loadProducts]);
+
+const handleChange = (event) => {
+const { name, value } = event.target;
+
+
+setForm((previous) => ({
+  ...previous,
+  [name]: value,
+}));
+
+setError("");
+setSuccess("");
+
+
+};
+
+const selectedProduct = products.find(
+(product) => String(product.id) === String(form.product_id)
+);
+
+const handleSubmit = async (event) => {
+event.preventDefault();
+
+
+setError("");
+setSuccess("");
+setLastMovement(null);
+
+const productId = Number(form.product_id);
+const quantity = Number(form.quantity);
+
+if (!Number.isInteger(productId) || productId <= 0) {
+  setError("Please select a valid product.");
+  return;
+}
+
+if (!Number.isInteger(quantity) || quantity <= 0) {
+  setError("Quantity must be a positive whole number.");
+  return;
+}
+
+if (quantity > 1_000_000) {
+  setError("Please enter a quantity of 1,000,000 or less.");
+  return;
+}
+
+if (form.reference.trim().length > 150) {
+  setError("Reference cannot exceed 150 characters.");
+  return;
+}
+
+if (form.notes.trim().length > 5000) {
+  setError("Notes cannot exceed 5,000 characters.");
+  return;
+}
+
+const confirmed = window.confirm(
+  `Add ${quantity} ${selectedProduct?.unit || "units"} to ${
+    selectedProduct?.name || "this product"
+  }?\n\nCurrent stock: ${selectedProduct?.stock ?? "Unknown"}`
+);
+
+if (!confirmed) return;
+
+setSubmitting(true);
+
+try {
+  const response = await axios.post(
+    `${API_BASE}/cashier/stock/add`,
+    {
+      product_id: productId,
+      quantity,
+      reference: form.reference.trim(),
+      notes: form.notes.trim(),
+    },
+    {
+      headers: {
+        ...getAuthHeaders(),
+        "Content-Type": "application/json",
+      },
+    }
+  );
+
+  setSuccess(
+    response.data.message || "Stock added successfully."
+  );
+
+  setLastMovement(response.data.movement || null);
+
+  setForm({
+    product_id: "",
+    quantity: "",
+    reference: "",
+    notes: "",
+  });
+
+  await loadProducts();
+} catch (err) {
+  setError(
+    err.response?.data?.message ||
+      "Stock could not be added. Please try again."
+  );
+} finally {
+  setSubmitting(false);
+}
+
+};
+
+return ( <main className="container py-4 py-lg-5"> <div className="d-flex flex-wrap justify-content-between align-items-center gap-3 mb-4"> <div> <p className="text-success fw-semibold text-uppercase small mb-1">
+Inventory </p>
+
+
+      <h1 className="h2 fw-bold mb-2">Stock Management</h1>
+
+      <p className="text-secondary mb-0">
+        Receive stock for existing products and automatically
+        record who performed each addition.
+      </p>
+    </div>
+
+    <button
+      type="button"
+      className="btn btn-outline-success"
+      onClick={loadProducts}
+      disabled={loading || submitting}
+    >
+      <i className="bi bi-arrow-clockwise me-2" />
+      Refresh Products
+    </button>
+  </div>
+
+  {error && (
+    <div className="alert alert-danger" role="alert">
+      <i className="bi bi-exclamation-triangle me-2" />
+      {error}
+    </div>
+  )}
+
+  {success && (
+    <div className="alert alert-success" role="status">
+      <i className="bi bi-check-circle me-2" />
+      {success}
+    </div>
+  )}
+
+  {lastMovement && (
+    <div className="card border-success shadow-sm mb-4">
+      <div className="card-body">
+        <h2 className="h6 fw-bold text-success">
+          <i className="bi bi-check-circle-fill me-2" />
+          Stock Addition Recorded
+        </h2>
+
+        <div className="row g-3">
+          <div className="col-6 col-md-3">
+            <div className="small text-secondary">
+              Product
+            </div>
+            <div className="fw-semibold">
+              {lastMovement.product_name}
+            </div>
+          </div>
+
+          <div className="col-6 col-md-3">
+            <div className="small text-secondary">
+              Previous Stock
+            </div>
+            <div className="fw-semibold">
+              {lastMovement.previous_stock}
+            </div>
+          </div>
+
+          <div className="col-6 col-md-3">
+            <div className="small text-secondary">
+              Quantity Added
+            </div>
+            <div className="fw-semibold text-success">
+              +{lastMovement.quantity_added}
+            </div>
+          </div>
+
+          <div className="col-6 col-md-3">
+            <div className="small text-secondary">
+              New Stock
+            </div>
+            <div className="fw-semibold">
+              {lastMovement.new_stock}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  )}
+
+  <div className="row g-4">
+    <div className="col-12 col-lg-7">
+      <div className="card border-0 shadow-sm h-100">
+        <div className="card-body p-4">
+          <h2 className="h5 fw-bold mb-4">
+            <i className="bi bi-box-seam text-success me-2" />
+            Record Stock Received
+          </h2>
+
+          {loading ? (
+            <div className="text-center py-5">
+              <div
+                className="spinner-border text-success"
+                role="status"
+              >
+                <span className="visually-hidden">
+                  Loading products...
+                </span>
+              </div>
+
+              <p className="text-secondary mt-3 mb-0">
+                Loading your inventory...
+              </p>
+            </div>
+          ) : products.length === 0 ? (
+            <div className="alert alert-info mb-0">
+              No active products were found. Ask an
+              administrator to check the product inventory.
+            </div>
+          ) : (
+            <form onSubmit={handleSubmit}>
+              <div className="mb-3">
+                <label
+                  htmlFor="stockProduct"
+                  className="form-label fw-semibold"
+                >
+                  Product <span className="text-danger">*</span>
+                </label>
+
+                <select
+                  id="stockProduct"
+                  name="product_id"
+                  className="form-select"
+                  value={form.product_id}
+                  onChange={handleChange}
+                  required
+                  disabled={submitting}
+                >
+                  <option value="">Select a product</option>
+
+                  {products.map((product) => (
+                    <option
+                      key={product.id}
+                      value={product.id}
+                    >
+                      {product.name} — Stock: {product.stock}{" "}
+                      {product.unit}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {selectedProduct && (
+                <div className="rounded bg-light p-3 mb-3">
+                  <div className="d-flex justify-content-between gap-3">
+                    <span className="text-secondary">
+                      Current stock
+                    </span>
+                    <strong>
+                      {selectedProduct.stock}{" "}
+                      {selectedProduct.unit}
+                    </strong>
+                  </div>
+
+                  <div className="d-flex justify-content-between gap-3 mt-2">
+                    <span className="text-secondary">
+                      Category
+                    </span>
+                    <span className="fw-semibold">
+                      {selectedProduct.category || "Uncategorized"}
+                    </span>
+                  </div>
+                </div>
+              )}
+
+              <div className="mb-3">
+                <label
+                  htmlFor="stockQuantity"
+                  className="form-label fw-semibold"
+                >
+                  Quantity Received{" "}
+                  <span className="text-danger">*</span>
+                </label>
+
+                <input
+                  id="stockQuantity"
+                  name="quantity"
+                  type="number"
+                  className="form-control"
+                  min="1"
+                  max="1000000"
+                  step="1"
+                  inputMode="numeric"
+                  placeholder="Enter quantity received"
+                  value={form.quantity}
+                  onChange={handleChange}
+                  required
+                  disabled={submitting}
+                />
+
+                <div className="form-text">
+                  Enter a positive whole number.
+                </div>
+              </div>
+
+              <div className="mb-3">
+                <label
+                  htmlFor="stockReference"
+                  className="form-label fw-semibold"
+                >
+                  Supplier / Delivery Reference
+                </label>
+
+                <input
+                  id="stockReference"
+                  name="reference"
+                  type="text"
+                  className="form-control"
+                  maxLength="150"
+                  placeholder="e.g. SUP-2026-001"
+                  value={form.reference}
+                  onChange={handleChange}
+                  disabled={submitting}
+                />
+              </div>
+
+              <div className="mb-4">
+                <label
+                  htmlFor="stockNotes"
+                  className="form-label fw-semibold"
+                >
+                  Notes
+                </label>
+
+                <textarea
+                  id="stockNotes"
+                  name="notes"
+                  className="form-control"
+                  rows="3"
+                  maxLength="5000"
+                  placeholder="Optional notes about the delivery..."
+                  value={form.notes}
+                  onChange={handleChange}
+                  disabled={submitting}
+                />
+              </div>
+
+              <div className="alert alert-warning small">
+                <i className="bi bi-shield-check me-2" />
+                Your cashier account will be recorded
+                automatically. Stock and its audit record are
+                saved together.
+              </div>
+
+              <button
+                type="submit"
+                className="btn btn-success w-100 py-2"
+                disabled={submitting || !selectedProduct}
+              >
+                {submitting ? (
+                  <>
+                    <span
+                      className="spinner-border spinner-border-sm me-2"
+                      role="status"
+                      aria-hidden="true"
+                    />
+                    Recording Stock...
+                  </>
+                ) : (
+                  <>
+                    <i className="bi bi-plus-circle me-2" />
+                    Add Stock
+                  </>
+                )}
+              </button>
+            </form>
+          )}
+        </div>
+      </div>
+    </div>
+
+    <div className="col-12 col-lg-5">
+      <div className="card border-0 shadow-sm mb-4">
+        <div className="card-body p-4">
+          <h2 className="h5 fw-bold mb-3">
+            <i className="bi bi-shield-check text-success me-2" />
+            Stock Accountability
+          </h2>
+
+          <ul className="list-unstyled mb-0">
+            <li className="d-flex gap-2 mb-3">
+              <i className="bi bi-check-circle-fill text-success mt-1" />
+              <span>
+                Each addition is linked to the authenticated
+                cashier.
+              </span>
+            </li>
+
+            <li className="d-flex gap-2 mb-3">
+              <i className="bi bi-check-circle-fill text-success mt-1" />
+              <span>
+                The previous and new stock quantities are
+                recorded.
+              </span>
+            </li>
+
+            <li className="d-flex gap-2 mb-3">
+              <i className="bi bi-check-circle-fill text-success mt-1" />
+              <span>
+                Supplier references and notes can be saved.
+              </span>
+            </li>
+
+            <li className="d-flex gap-2">
+              <i className="bi bi-check-circle-fill text-success mt-1" />
+              <span>
+                Failed transactions are rolled back.
+              </span>
+            </li>
+          </ul>
+        </div>
+      </div>
+
+      <div className="card border-0 shadow-sm">
+        <div className="card-body p-4">
+          <h2 className="h5 fw-bold mb-2">
+            <i className="bi bi-clock-history text-success me-2" />
+            Stock History
+          </h2>
+
+          <p className="text-secondary mb-3">
+            Review previous stock additions, quantities,
+            timestamps, and references.
+          </p>
+
+          <a
+            href="/cashier/stock-history"
+            className="btn btn-outline-success w-100"
+          >
+            View My Stock History
+            <i className="bi bi-arrow-right ms-2" />
+          </a>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div className="card border-0 shadow-sm mt-4">
+    <div className="card-body p-4">
+      <div className="d-flex justify-content-between align-items-center gap-3 mb-3">
+        <div>
+          <h2 className="h5 fw-bold mb-1">
+            Current Product Stock
+          </h2>
+          <p className="text-secondary small mb-0">
+            Current inventory for active products.
+          </p>
+        </div>
+
+        <span className="badge text-bg-success">
+          {products.length} products
+        </span>
+      </div>
+
+      {loading ? (
+        <p className="text-secondary mb-0">
+          Loading inventory...
+        </p>
+      ) : products.length === 0 ? (
+        <p className="text-secondary mb-0">
+          No active products found.
+        </p>
+      ) : (
+        <div className="table-responsive">
+          <table className="table table-hover align-middle mb-0">
+            <thead className="table-light">
+              <tr>
+                <th>Product</th>
+                <th>Category</th>
+                <th>Current Stock</th>
+                <th>Unit</th>
+              </tr>
+            </thead>
+
+            <tbody>
+              {products.map((product) => (
+                <tr key={product.id}>
+                  <td className="fw-semibold">
+                    {product.name}
+                  </td>
+
+                  <td>{product.category || "—"}</td>
+
+                  <td>
+                    <span
+                      className={`badge ${
+                        product.stock <= 5
+                          ? "text-bg-warning"
+                          : "text-bg-success"
+                      }`}
+                    >
+                      {product.stock}
+                    </span>
+                  </td>
+
+                  <td>{product.unit || "—"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  </div>
+</main>
+
+
+);
+}
+
+export default CashierStock;

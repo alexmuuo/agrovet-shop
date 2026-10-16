@@ -17,6 +17,7 @@ import ResetPassword from "./pages/ResetPassword";
 // Shared components
 import Navbar from "./components/Navbar";
 import AdminNavbar from "./components/AdminNavbar";
+import CashierNavbar from "./components/CashierNavbar";
 
 // Admin pages
 import AdminDashboard from "./pages/AdminDashboard";
@@ -30,11 +31,15 @@ import Deliveries from "./pages/seller/Deliveries";
 import Reports from "./pages/seller/Reports";
 import Cashiers from "./pages/seller/Cashiers";
 import AdminLogin from "./pages/AdminLogin";
+import AdminStockHistory from "./pages/seller/StockHistory";
 
 // Cashier pages
 import CashierLogin from "./pages/cashier/CashierLogin";
 import CashierPOS from "./pages/cashier/CashierPOS";
 import SalesHistory from "./pages/cashier/SalesHistory";
+import CashierOrders from "./pages/cashier/CashierOrders";
+import CashierDeliveries from "./pages/cashier/CashierDeliveries";
+import CashierStockHistory from "./pages/cashier/CashierStockHistory";
 
 // Route protection
 import AdminProtectedRoute from "./components/AdminProtectedRoute";
@@ -70,10 +75,13 @@ const showCustomerNavbar =
 
 return (
 <>
-{showAdminNavbar ? ( <AdminNavbar />
-) : showCustomerNavbar ? ( <Navbar />
+{showAdminNavbar ? (
+  <AdminNavbar />
+) : isCashierPage ? (
+  <CashierNavbar />
+) : showCustomerNavbar ? (
+  <Navbar />
 ) : null}
-
 
   <Routes>
     {/* Customer routes */}
@@ -178,6 +186,10 @@ return (
         element={<Cashiers />}
       />
     </Route>
+    <Route
+  path="/admin/stock-history"
+  element={<AdminStockHistory />}
+/>
 
     {/* Cashier login */}
     <Route
@@ -196,7 +208,13 @@ return (
         path="/cashier/sales-history"
         element={<SalesHistory />}
       />
+      <Route path="/cashier/orders" element={<CashierOrders />} />
+      <Route path="/cashier/deliveries" element={<CashierDeliveries />} />
     </Route>
+    <Route
+  path="/cashier/stock-history"
+  element={<CashierStockHistory />}
+/>
   </Routes>
 </>
 

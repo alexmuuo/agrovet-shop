@@ -5,6 +5,7 @@ from flask import Flask, jsonify
 from flask_cors import CORS
 from flask_mail import Mail
 from dotenv import load_dotenv
+from flask_migrate import Migrate
 
 from extensions import db
 
@@ -114,10 +115,14 @@ CORS(
 
 
 # --------------------------------------------------
-# INITIALIZE DATABASE
+# INITIALIZE DATABASE AND MIGRATIONS
 # --------------------------------------------------
 
 db.init_app(app)
+
+# Enables Flask-Migrate commands (flask db ...).
+# This does not modify the database until a migration is applied.
+migrate = Migrate(app, db)
 
 
 # --------------------------------------------------
@@ -141,7 +146,7 @@ from models.notification import Notification
 from models.payment import Payment
 from models.cashier import Cashier
 from models.cash_collection import CashCollection
-
+from models.stock_movement import StockMovement
 
 # --------------------------------------------------
 # IMPORT ROUTES

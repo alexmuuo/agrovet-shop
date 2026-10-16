@@ -393,14 +393,26 @@ def create_product():
                 "message": f"{field} must be a non-empty string.",
             }), 400
 
-    # Validate price.
+    # Validate the buying cost and selling price.
+    # Buying price is required for newly created products so the
+    # profit report can calculate cost of goods sold accurately.
+    buying_price = validate_price(data.get("buying_price"))
+
+    if buying_price is None:
+        return jsonify({
+            "status": "error",
+            "message": (
+                "Buying price must be a valid non-negative number."
+            ),
+        }), 400
+
     price = validate_price(data.get("price"))
 
     if price is None:
         return jsonify({
             "status": "error",
             "message": (
-                "Price must be a valid non-negative number."
+                "Selling price must be a valid non-negative number."
             ),
         }), 400
 
@@ -485,6 +497,7 @@ def create_product():
             name=name,
             category=category,
             description=description,
+            buying_price=buying_price,
             price=price,
             unit=unit,
             stock=stock,
@@ -557,7 +570,22 @@ def update_product(product_id):
                     ),
                 }), 400
 
-    # Validate price.
+    # Validate buying price. If omitted, preserve the existing value.
+    if "buying_price" in data:
+        buying_price = validate_price(data["buying_price"])
+
+        if buying_price is None:
+            return jsonify({
+                "status": "error",
+                "message": (
+                    "Buying price must be a valid non-negative number."
+                ),
+            }), 400
+
+        product.buying_price = buying_price
+
+    # Validate selling price. The existing API field remains "price"
+    # to avoid breaking customer catalogue, cart, and checkout code.
     if "price" in data:
         price = validate_price(data["price"])
 
@@ -565,7 +593,7 @@ def update_product(product_id):
             return jsonify({
                 "status": "error",
                 "message": (
-                    "Price must be a valid non-negative number."
+                    "Selling price must be a valid non-negative number."
                 ),
             }), 400
 

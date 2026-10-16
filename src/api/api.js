@@ -6,9 +6,7 @@ import axios from "axios";
 
 const api = axios.create({
   baseURL: "https://agrovet-api-a00w.onrender.com/api",
-  headers: {
-    "Content-Type": "application/json",
-  },
+  timeout: 30000,
 });
 
 // ============================================================
@@ -34,7 +32,7 @@ api.interceptors.request.use(
 
     // Product creation, editing, and deletion require admin auth.
     const isProductMutation =
-      /(?:^|\/)products(?:\/|$)/.test(cleanUrl) &&
+      /^\/products(?:\/|$)/.test(cleanUrl) &&
       ["post", "put", "patch", "delete"].includes(method);
 
     // Creating a cashier requires admin authentication.
@@ -97,6 +95,19 @@ api.interceptors.request.use(
       if (customerToken) {
         config.headers.Authorization = `Bearer ${customerToken}`;
       }
+    }
+
+    // ========================================================
+    // FORM DATA / IMAGE UPLOAD SUPPORT
+    // ========================================================
+
+    // Allow the browser to set the multipart boundary automatically.
+    if (
+      typeof FormData !== "undefined" &&
+      config.data instanceof FormData
+    ) {
+      delete config.headers["Content-Type"];
+      delete config.headers["content-type"];
     }
 
     return config;

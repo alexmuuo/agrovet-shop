@@ -1,10 +1,9 @@
-
 import logging
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 
 from flask import Blueprint, jsonify, request, g
-from sqlalchemy import select
+from sqlalchemy import select, func
 from sqlalchemy.exc import IntegrityError
 
 from extensions import db
@@ -13,6 +12,7 @@ from models.product import Product
 from models.customer import Customer
 from models.notification import Notification
 from models.cash_collection import CashCollection
+from models.stock_movement import StockMovement
 from admin_auth import admin_required
 
 
@@ -111,6 +111,24 @@ def report_date_filters(start_date, end_date):
     }
 
 
+def normalize_status(value):
+    """Normalize statuses for consistent comparisons."""
+
+    if not isinstance(value, str):
+        return ""
+
+    return value.strip().lower().replace("-", "_").replace(" ", "_")
+
+
+def calculate_margin(profit, revenue):
+    """Calculate percentage margin safely."""
+
+    if revenue <= Decimal("0.00"):
+        return Decimal("0.00")
+
+    return (profit / revenue) * Decimal("100")
+
+
 # ============================================================
 # PAYMENT HELPER FUNCTIONS
 # ============================================================
@@ -128,9 +146,6 @@ def is_electronic_payment_method(payment_method):
     """
     Identify payment methods that must not be manually confirmed
     without verified payment-provider confirmation.
-
-    Extend this set if additional electronic payment methods
-    are introduced in the application.
     """
 
     method = normalize_payment_value(payment_method)
@@ -159,14 +174,6 @@ def is_electronic_payment_method(payment_method):
 def get_manual_payment_eligibility(order):
     """
     Determine whether an order can be manually marked as paid.
-
-    Cash orders are eligible.
-
-    Pickup orders are eligible only when their payment method
-    is not an electronic payment method.
-
-    Electronic payments must be confirmed through their
-    verified payment-provider flow.
     """
 
     payment_method = normalize_payment_value(
@@ -184,6 +191,7 @@ def get_manual_payment_eligibility(order):
         )
 
     is_cash_order = payment_method == "cash"
+
     is_pickup_order = order_type in {
         "pickup",
         "pick_up",
@@ -230,11 +238,6 @@ def get_orders():
 
 # ============================================================
 # MARK ORDER AS PAID — ADMIN ONLY
-#
-# POST /api/admin/orders/<order_id>/mark-paid
-#
-# BACKWARD-COMPATIBLE ROUTE:
-# POST /api/admin/orders/<order_id>/cash-payment
 # ============================================================
 
 @admin_bp.route(
@@ -248,8 +251,6 @@ def get_orders():
 @admin_required
 def mark_order_as_paid(order_id):
     try:
-        # Lock the order row where supported by the database.
-        # This reduces the chance of concurrent confirmations.
         order = db.session.execute(
             select(Order)
             .where(Order.id == order_id)
@@ -262,8 +263,10 @@ def mark_order_as_paid(order_id):
                 "message": "Order not found."
             }), 404
 
-        # Cancelled orders must not receive a new payment record.
-        if normalize_payment_value(order.status) == "cancelled":
+        if normalize_payment_value(order.status) in {
+            "cancelled",
+            "canceled",
+        }:
             return jsonify({
                 "status": "error",
                 "message": (
@@ -271,8 +274,6 @@ def mark_order_as_paid(order_id):
                 )
             }), 400
 
-        # Do not allow the manual endpoint to override verified
-        # payment-provider flows or manually mark M-Pesa payments.
         eligible, eligibility_message = (
             get_manual_payment_eligibility(order)
         )
@@ -283,7 +284,6 @@ def mark_order_as_paid(order_id):
                 "message": eligibility_message
             }), 400
 
-        # A payment can be confirmed only once.
         existing_collection = CashCollection.query.filter_by(
             order_id=order.id
         ).first()
@@ -297,7 +297,6 @@ def mark_order_as_paid(order_id):
                 "message": "This order has already been paid."
             }), 409
 
-        # Validate the order amount before creating the record.
         try:
             amount = get_order_amount(order)
 
@@ -315,7 +314,6 @@ def mark_order_as_paid(order_id):
                 )
             }), 400
 
-        # Verify the authenticated admin identity.
         admin_data = getattr(g, "admin", {}) or {}
 
         if not isinstance(admin_data, dict):
@@ -343,9 +341,6 @@ def mark_order_as_paid(order_id):
 
         admin_username = admin_username.strip()
 
-        # This endpoint confirms a payment received manually.
-        # The electronic payment flow must confirm electronic
-        # payments through its own verified backend callback.
         collection = CashCollection(
             order_id=order.id,
             amount=amount,
@@ -358,19 +353,13 @@ def mark_order_as_paid(order_id):
         )
 
         db.session.add(collection)
-
-        # Keep payment status independent from order and delivery
-        # statuses. Only this explicit payment confirmation changes it.
         order.payment_status = "paid"
 
-        # Flush first so database constraint violations are detected
-        # before preparing the success response.
         db.session.flush()
 
         collection_data = collection.to_dict()
         updated_order = order.to_dict()
 
-        # The payment record and payment status are committed together.
         db.session.commit()
 
         return jsonify({
@@ -384,8 +373,6 @@ def mark_order_as_paid(order_id):
         }), 200
 
     except IntegrityError:
-        # The unique constraint on CashCollection.order_id protects
-        # against duplicate collection records.
         db.session.rollback()
 
         logger.warning(
@@ -422,8 +409,6 @@ def mark_order_as_paid(order_id):
 
 # ============================================================
 # UPDATE ORDER STATUS — ADMIN ONLY
-# RESTORE STOCK WHEN AN ORDER IS CANCELLED
-# PUT /api/admin/orders/<order_id>/status
 # ============================================================
 
 @admin_bp.route(
@@ -484,9 +469,8 @@ def update_order_status(order_id):
                 "order": order.to_dict()
             }), 200
 
-        # Restore stock only when the order is first cancelled.
         if new_status == "cancelled":
-            if order.payment_status == "paid":
+            if normalize_payment_value(order.payment_status) == "paid":
                 return jsonify({
                     "status": "error",
                     "message": (
@@ -517,7 +501,6 @@ def update_order_status(order_id):
                 for product in products
             }
 
-            # Validate all products before restoring any stock.
             for item in order_items:
                 if item.product_id not in products_by_id:
                     db.session.rollback()
@@ -536,52 +519,38 @@ def update_order_status(order_id):
         order.status = new_status
 
         status_messages = {
-            "pending": {
-                "title": "Order Status Updated",
-                "message": (
-                    f"Your order {order.order_number} "
-                    "is now pending."
-                )
-            },
-            "confirmed": {
-                "title": "Order Confirmed",
-                "message": (
-                    f"Good news! Your order {order.order_number} "
-                    "has been confirmed."
-                )
-            },
-            "ready": {
-                "title": "Order Ready",
-                "message": (
-                    f"Your order {order.order_number} is ready. "
-                    "Please check your order details for next steps."
-                )
-            },
-            "completed": {
-                "title": "Order Completed",
-                "message": (
-                    f"Your order {order.order_number} has been "
-                    "marked as completed. Thank you for shopping "
-                    "with us!"
-                )
-            },
-            "cancelled": {
-                "title": "Order Cancelled",
-                "message": (
-                    f"Your order {order.order_number} has been "
-                    "cancelled and the ordered stock returned "
-                    "to inventory."
-                )
-            }
+            "pending": (
+                "Order Status Updated",
+                f"Your order {order.order_number} is now pending."
+            ),
+            "confirmed": (
+                "Order Confirmed",
+                f"Good news! Your order {order.order_number} has been confirmed."
+            ),
+            "ready": (
+                "Order Ready",
+                f"Your order {order.order_number} is ready. "
+                "Please check your order details for next steps."
+            ),
+            "completed": (
+                "Order Completed",
+                f"Your order {order.order_number} has been marked as completed. "
+                "Thank you for shopping with us!"
+            ),
+            "cancelled": (
+                "Order Cancelled",
+                f"Your order {order.order_number} has been cancelled "
+                "and the ordered stock returned to inventory."
+            )
         }
 
-        details = status_messages[new_status]
+        title, message = status_messages[new_status]
 
         db.session.add(Notification(
             customer_id=order.customer_id,
             type="order_status",
-            title=details["title"],
-            message=details["message"],
+            title=title,
+            message=message,
             related_id=order.id
         ))
 
@@ -615,7 +584,6 @@ def update_order_status(order_id):
 
 # ============================================================
 # GET DELIVERY ORDERS — ADMIN ONLY
-# GET /api/admin/deliveries
 # ============================================================
 
 @admin_bp.route("/api/admin/deliveries", methods=["GET"])
@@ -645,7 +613,6 @@ def get_deliveries():
 
 # ============================================================
 # ASSIGN DELIVERY PERSON — ADMIN ONLY
-# PUT /api/admin/orders/<order_id>/delivery/assign
 # ============================================================
 
 @admin_bp.route(
@@ -669,7 +636,7 @@ def assign_delivery_person(order_id):
                 "message": "This order is not a delivery order."
             }), 400
 
-        if order.status == "cancelled":
+        if normalize_status(order.status) in {"cancelled", "canceled"}:
             return jsonify({
                 "status": "error",
                 "message": "Cannot assign delivery for a cancelled order."
@@ -739,7 +706,6 @@ def assign_delivery_person(order_id):
 
 # ============================================================
 # UPDATE DELIVERY STATUS — ADMIN ONLY
-# PUT /api/admin/orders/<order_id>/delivery/status
 # ============================================================
 
 @admin_bp.route(
@@ -763,7 +729,7 @@ def update_delivery_status(order_id):
                 "message": "This order is not a delivery order."
             }), 400
 
-        if order.status == "cancelled":
+        if normalize_status(order.status) in {"cancelled", "canceled"}:
             return jsonify({
                 "status": "error",
                 "message": (
@@ -810,18 +776,10 @@ def update_delivery_status(order_id):
 
         delivery_messages = {
             "pending": "Your delivery is awaiting assignment.",
-            "assigned": (
-                "A delivery person has been assigned to your order."
-            ),
-            "dispatched": (
-                "Your order has been dispatched for delivery."
-            ),
-            "in_transit": (
-                "Your order is on its way to the delivery location."
-            ),
-            "delivered": (
-                "Your order has been delivered. Thank you!"
-            ),
+            "assigned": "A delivery person has been assigned to your order.",
+            "dispatched": "Your order has been dispatched for delivery.",
+            "in_transit": "Your order is on its way to the delivery location.",
+            "delivered": "Your order has been delivered. Thank you!",
             "failed": (
                 "We could not complete your delivery. "
                 "Please contact us for assistance."
@@ -840,7 +798,6 @@ def update_delivery_status(order_id):
                 related_id=order.id
             ))
 
-        # Delivery status does not automatically mark payment as paid.
         db.session.commit()
 
         return jsonify({
@@ -865,7 +822,6 @@ def update_delivery_status(order_id):
 
 # ============================================================
 # UPDATE DELIVERY NOTES — ADMIN ONLY
-# PUT /api/admin/orders/<order_id>/delivery/notes
 # ============================================================
 
 @admin_bp.route(
@@ -889,7 +845,7 @@ def update_delivery_notes(order_id):
                 "message": "This order is not a delivery order."
             }), 400
 
-        if order.status == "cancelled":
+        if normalize_status(order.status) in {"cancelled", "canceled"}:
             return jsonify({
                 "status": "error",
                 "message": (
@@ -940,7 +896,6 @@ def update_delivery_notes(order_id):
 
 # ============================================================
 # GET ALL CUSTOMERS — ADMIN ONLY
-# GET /api/admin/customers
 # ============================================================
 
 @admin_bp.route("/api/admin/customers", methods=["GET"])
@@ -968,7 +923,6 @@ def get_customers():
 
 # ============================================================
 # REPORT 1: OVERVIEW — ADMIN ONLY
-# GET /api/admin/reports/overview
 # ============================================================
 
 @admin_bp.route(
@@ -996,14 +950,16 @@ def get_reports_overview():
         completed_order_value = Decimal("0.00")
 
         for order in orders:
-            status_counts[order.status] = (
-                status_counts.get(order.status, 0) + 1
+            status = normalize_status(order.status)
+
+            status_counts[status] = (
+                status_counts.get(status, 0) + 1
             )
 
             amount = get_order_amount(order)
             order_value += amount
 
-            if order.status == "completed":
+            if status == "completed":
                 completed_order_value += amount
 
         return jsonify({
@@ -1018,12 +974,13 @@ def get_reports_overview():
                 "completed_order_value": money(
                     completed_order_value
                 ),
+                "total_customers": Customer.query.count(),
+                "total_products": Product.query.count(),
                 "status_counts": status_counts
             },
             "note": (
                 "Order values are not verified payment revenue. "
-                "Completed orders are not necessarily confirmed "
-                "as paid."
+                "Use the profit report for confirmed paid sales."
             )
         }), 200
 
@@ -1045,7 +1002,6 @@ def get_reports_overview():
 
 # ============================================================
 # REPORT 2: SALES BY DAY — ADMIN ONLY
-# GET /api/admin/reports/sales
 # ============================================================
 
 @admin_bp.route(
@@ -1083,7 +1039,7 @@ def get_sales_report():
             daily_sales[day]["orders"] += 1
             daily_sales[day]["order_value"] += amount
 
-            if order.status == "completed":
+            if normalize_status(order.status) == "completed":
                 daily_sales[day]["completed_orders"] += 1
                 daily_sales[day]["completed_order_value"] += amount
 
@@ -1093,9 +1049,7 @@ def get_sales_report():
             results.append({
                 "date": day_data["date"],
                 "orders": day_data["orders"],
-                "order_value": money(
-                    day_data["order_value"]
-                ),
+                "order_value": money(day_data["order_value"]),
                 "completed_orders": day_data["completed_orders"],
                 "completed_order_value": money(
                     day_data["completed_order_value"]
@@ -1129,7 +1083,6 @@ def get_sales_report():
 
 # ============================================================
 # REPORT 3: BEST-SELLING PRODUCTS — ADMIN ONLY
-# GET /api/admin/reports/products
 # ============================================================
 
 @admin_bp.route(
@@ -1143,17 +1096,17 @@ def get_product_report():
 
         query = db.session.query(
             OrderItem.product_id,
-            db.func.sum(
+            func.sum(
                 OrderItem.quantity
             ).label("quantity_sold"),
-            db.func.sum(
+            func.sum(
                 OrderItem.price * OrderItem.quantity
             ).label("item_value")
         ).join(
             Order,
             OrderItem.order_id == Order.id
         ).filter(
-            Order.status != "cancelled"
+            func.lower(Order.status) != "cancelled"
         )
 
         if start_date:
@@ -1169,7 +1122,7 @@ def get_product_report():
         rows = query.group_by(
             OrderItem.product_id
         ).order_by(
-            db.func.sum(OrderItem.quantity).desc()
+            func.sum(OrderItem.quantity).desc()
         ).all()
 
         products = []
@@ -1186,15 +1139,26 @@ def get_product_report():
                     if product
                     else "Deleted product"
                 ),
-                "quantity_sold": int(
-                    row.quantity_sold or 0
-                ),
+                "quantity_sold": int(row.quantity_sold or 0),
                 "item_value": money(row.item_value)
             })
 
         return jsonify({
             "status": "success",
-            "products": products
+            "products": products,
+            "total_products_sold": len(products),
+            "total_quantity_sold": sum(
+                item["quantity_sold"] for item in products
+            ),
+            "total_item_value": money(
+                sum(
+                    (
+                        Decimal(str(item["item_value"]))
+                        for item in products
+                    ),
+                    Decimal("0.00")
+                )
+            )
         }), 200
 
     except ValueError as error:
@@ -1215,7 +1179,6 @@ def get_product_report():
 
 # ============================================================
 # REPORT 4: DELIVERY STATISTICS — ADMIN ONLY
-# GET /api/admin/reports/deliveries
 # ============================================================
 
 @admin_bp.route(
@@ -1243,10 +1206,10 @@ def get_delivery_report():
         }
 
         for order in orders:
-            delivery_status_counts[order.delivery_status] = (
-                delivery_status_counts.get(
-                    order.delivery_status, 0
-                ) + 1
+            status = normalize_status(order.delivery_status)
+
+            delivery_status_counts[status] = (
+                delivery_status_counts.get(status, 0) + 1
             )
 
         return jsonify({
@@ -1255,7 +1218,13 @@ def get_delivery_report():
                 start_date, end_date
             ),
             "total_delivery_orders": len(orders),
-            "delivery_status_counts": delivery_status_counts
+            "delivery_status_counts": delivery_status_counts,
+            "completed_deliveries": (
+                delivery_status_counts["delivered"]
+            ),
+            "pending_deliveries": (
+                delivery_status_counts["pending"]
+            )
         }), 200
 
     except ValueError as error:
@@ -1271,4 +1240,450 @@ def get_delivery_report():
         return jsonify({
             "status": "error",
             "message": "Unable to generate delivery report."
+        }), 500
+
+
+# ============================================================
+# REPORT 5: PROFIT & ANALYTICS — ADMIN ONLY
+#
+# GET /api/admin/reports/profit
+#
+# Only confirmed paid orders are included.
+# Cancelled orders are excluded.
+#
+# Historical item costs are read from OrderItem.buying_price.
+# Missing costs are reported as unknown, not assumed to be zero.
+# ============================================================
+
+@admin_bp.route(
+    "/api/admin/reports/profit",
+    methods=["GET"]
+)
+@admin_required
+def get_profit_report():
+    try:
+        start_date, end_date = get_date_range()
+
+        # ----------------------------------------------------
+        # SELECT CONFIRMED PAID ORDERS
+        # ----------------------------------------------------
+
+        orders_query = get_filtered_orders(
+            start_date,
+            end_date
+        ).filter(
+            func.lower(Order.payment_status) == "paid",
+            func.lower(Order.status).notin_(
+                ["cancelled", "canceled"]
+            )
+        ).order_by(
+            Order.created_at.asc()
+        )
+
+        orders = orders_query.all()
+
+        paid_order_ids = [
+            order.id for order in orders
+        ]
+
+        # Totals use Decimal to avoid floating-point arithmetic
+        # during financial calculations.
+        sales_revenue = Decimal("0.00")
+        cost_of_goods_sold = Decimal("0.00")
+        known_cost_revenue = Decimal("0.00")
+        unknown_cost_sales_value = Decimal("0.00")
+
+        known_cost_item_count = 0
+        unknown_cost_item_count = 0
+        quantity_sold = 0
+
+        product_totals = {}
+
+        # ----------------------------------------------------
+        # FETCH ORDER ITEMS
+        # ----------------------------------------------------
+
+        order_items = []
+
+        if paid_order_ids:
+            order_items = OrderItem.query.filter(
+                OrderItem.order_id.in_(paid_order_ids)
+            ).order_by(
+                OrderItem.id.asc()
+            ).all()
+
+        for item in order_items:
+            quantity = int(item.quantity or 0)
+
+            if quantity <= 0:
+                logger.warning(
+                    "Skipping invalid quantity for OrderItem ID %s.",
+                    item.id
+                )
+                continue
+
+            try:
+                selling_price = Decimal(
+                    str(item.price)
+                )
+
+                if (
+                    not selling_price.is_finite()
+                    or selling_price < Decimal("0.00")
+                ):
+                    raise InvalidOperation
+
+            except (InvalidOperation, ValueError, TypeError):
+                logger.warning(
+                    "Skipping invalid selling price for OrderItem ID %s.",
+                    item.id
+                )
+                continue
+
+            item_revenue = selling_price * quantity
+
+            sales_revenue += item_revenue
+            quantity_sold += quantity
+
+            # Product identity is retained even if the product
+            # has subsequently been deleted.
+            product = db.session.get(
+                Product,
+                item.product_id
+            )
+
+            product_name = (
+                product.name
+                if product
+                else "Deleted product"
+            )
+
+            if item.product_id not in product_totals:
+                product_totals[item.product_id] = {
+                    "product_id": item.product_id,
+                    "product_name": product_name,
+                    "quantity_sold": 0,
+                    "sales_revenue": Decimal("0.00"),
+                    "cost_of_goods_sold": Decimal("0.00"),
+                    "gross_profit": Decimal("0.00"),
+                    "known_cost_quantity": 0,
+                    "unknown_cost_quantity": 0,
+                    "unknown_cost_sales_value": Decimal("0.00")
+                }
+
+            product_data = product_totals[item.product_id]
+
+            product_data["quantity_sold"] += quantity
+            product_data["sales_revenue"] += item_revenue
+
+            # IMPORTANT:
+            # Use only the historical buying-price snapshot.
+            # Never substitute today's product buying price.
+            buying_price = getattr(
+                item,
+                "buying_price",
+                None
+            )
+
+            if buying_price is None:
+                unknown_cost_item_count += 1
+                unknown_cost_sales_value += item_revenue
+
+                product_data["unknown_cost_quantity"] += quantity
+                product_data["unknown_cost_sales_value"] += item_revenue
+
+                continue
+
+            try:
+                buying_price = Decimal(
+                    str(buying_price)
+                )
+
+                if (
+                    not buying_price.is_finite()
+                    or buying_price < Decimal("0.00")
+                ):
+                    raise InvalidOperation
+
+            except (InvalidOperation, ValueError, TypeError):
+                unknown_cost_item_count += 1
+                unknown_cost_sales_value += item_revenue
+
+                product_data["unknown_cost_quantity"] += quantity
+                product_data["unknown_cost_sales_value"] += item_revenue
+
+                logger.warning(
+                    "Invalid historical buying price for OrderItem ID %s.",
+                    item.id
+                )
+
+                continue
+
+            item_cost = buying_price * quantity
+            item_profit = item_revenue - item_cost
+
+            cost_of_goods_sold += item_cost
+            known_cost_revenue += item_revenue
+            known_cost_item_count += 1
+
+            product_data["cost_of_goods_sold"] += item_cost
+            product_data["gross_profit"] += item_profit
+            product_data["known_cost_quantity"] += quantity
+
+        # ----------------------------------------------------
+        # OVERALL PROFIT
+        # ----------------------------------------------------
+
+        # This figure represents profit on items whose historical
+        # costs are known. It is not a complete business-wide profit
+        # figure when any included sales have unknown costs.
+        gross_profit = (
+            known_cost_revenue - cost_of_goods_sold
+        )
+
+        profit_margin = calculate_margin(
+            gross_profit,
+            known_cost_revenue
+        )
+
+        # ----------------------------------------------------
+        # PRODUCT-LEVEL PROFITABILITY
+        # ----------------------------------------------------
+
+        product_results = []
+
+        for product_data in product_totals.values():
+            known_revenue = (
+                product_data["sales_revenue"]
+                - product_data["unknown_cost_sales_value"]
+            )
+
+            known_cost_quantity = product_data[
+                "known_cost_quantity"
+            ]
+
+            unknown_cost_quantity = product_data[
+                "unknown_cost_quantity"
+            ]
+
+            product_profit = product_data["gross_profit"]
+
+            # If any units have unknown cost, explicitly flag the
+            # product's profit as incomplete.
+            cost_complete = unknown_cost_quantity == 0
+
+            product_margin = calculate_margin(
+                product_profit,
+                known_revenue
+            )
+
+            product_results.append({
+                "product_id": product_data["product_id"],
+                "product_name": product_data["product_name"],
+                "quantity_sold": product_data["quantity_sold"],
+                "sales_revenue": money(
+                    product_data["sales_revenue"]
+                ),
+                "item_value": money(
+                    product_data["sales_revenue"]
+                ),
+                "cost_of_goods_sold": money(
+                    product_data["cost_of_goods_sold"]
+                ),
+                "gross_profit": (
+                    money(product_profit)
+                    if known_cost_quantity > 0
+                    else None
+                ),
+                "profit_margin": (
+                    money(product_margin)
+                    if known_revenue > Decimal("0.00")
+                    and known_cost_quantity > 0
+                    else None
+                ),
+                "cost_known": cost_complete,
+                "unknown_cost": not cost_complete,
+                "known_cost_quantity": known_cost_quantity,
+                "unknown_cost_quantity": unknown_cost_quantity,
+                "unknown_cost_sales_value": money(
+                    product_data["unknown_cost_sales_value"]
+                )
+            })
+
+        product_results.sort(
+            key=lambda item: item["sales_revenue"],
+            reverse=True
+        )
+
+        # ----------------------------------------------------
+        # RESPONSE
+        # ----------------------------------------------------
+
+        return jsonify({
+            "status": "success",
+
+            "filters": report_date_filters(
+                start_date,
+                end_date
+            ),
+
+            "profit": {
+                "total_orders": len(orders),
+
+                "sales_revenue": money(sales_revenue),
+                "total_sales": money(sales_revenue),
+                "revenue": money(sales_revenue),
+
+                "cost_of_goods_sold": money(cost_of_goods_sold),
+                "total_cost": money(cost_of_goods_sold),
+                "cost": money(cost_of_goods_sold),
+
+                "gross_profit": money(gross_profit),
+                "total_profit": money(gross_profit),
+                "profit": money(gross_profit),
+
+                "profit_margin": money(profit_margin),
+                "gross_profit_margin": money(profit_margin),
+                "margin": money(profit_margin),
+
+                "known_cost_revenue": money(known_cost_revenue),
+
+                "unknown_cost_sales_value": money(
+                    unknown_cost_sales_value
+                ),
+
+                "unknown_cost_revenue": money(
+                    unknown_cost_sales_value
+                ),
+
+                "known_cost_item_count": known_cost_item_count,
+                "unknown_cost_item_count": unknown_cost_item_count,
+
+                "quantity_sold": quantity_sold,
+
+                "products": product_results,
+                "product_profit": product_results,
+                "items": product_results,
+
+                "profit_is_complete": (
+                    unknown_cost_item_count == 0
+                )
+            },
+
+            "note": (
+                "This report includes confirmed paid orders and "
+                "excludes cancelled orders. Gross profit and margin "
+                "are calculated only for items with a valid recorded "
+                "historical buying-price snapshot. Sales with unknown "
+                "costs are reported separately. These figures do not "
+                "include operating expenses, taxes, or other business "
+                "costs and therefore are not net profit."
+            )
+        }), 200
+
+    except ValueError as error:
+        return jsonify({
+            "status": "error",
+            "message": str(error)
+        }), 400
+
+    except Exception:
+        db.session.rollback()
+
+        logger.exception(
+            "Failed to generate profit report."
+        )
+
+        return jsonify({
+            "status": "error",
+            "message": "Unable to generate profit report."
+        }), 500
+
+    # ============================================================
+# STOCK HISTORY — ADMIN ONLY
+#
+# GET /api/admin/stock-history
+#
+# Returns stock additions made by all cashiers.
+# Supports optional cashier and date filters.
+# ============================================================
+
+@admin_bp.route(
+    "/api/admin/stock-history",
+    methods=["GET"]
+)
+@admin_required
+def get_admin_stock_history():
+    try:
+        # ----------------------------------------------------
+        # OPTIONAL FILTERS
+        # ----------------------------------------------------
+
+        cashier_id = request.args.get("cashier_id", type=int)
+
+        try:
+            start_date, end_date = parse_report_dates()
+        except ValueError as error:
+            return jsonify({
+                "status": "error",
+                "message": str(error)
+            }), 400
+
+        # ----------------------------------------------------
+        # BUILD QUERY
+        # ----------------------------------------------------
+
+        query = StockMovement.query
+
+        if cashier_id is not None:
+            if cashier_id <= 0:
+                return jsonify({
+                    "status": "error",
+                    "message": "Invalid cashier ID."
+                }), 400
+
+            query = query.filter(
+                StockMovement.cashier_id == cashier_id
+            )
+
+        if start_date:
+            query = query.filter(
+                StockMovement.created_at >= start_date
+            )
+
+        if end_date:
+            query = query.filter(
+                StockMovement.created_at < end_date
+            )
+
+        # ----------------------------------------------------
+        # RETRIEVE NEWEST RECORDS FIRST
+        # ----------------------------------------------------
+
+        movements = query.order_by(
+            StockMovement.created_at.desc(),
+            StockMovement.id.desc()
+        ).all()
+
+        # ----------------------------------------------------
+        # SERIALIZE RECORDS
+        # ----------------------------------------------------
+
+        records = [
+            movement.to_dict()
+            for movement in movements
+        ]
+
+        return jsonify(records), 200
+
+    except Exception:
+        db.session.rollback()
+
+        logger.exception(
+            "Failed to retrieve admin stock history."
+        )
+
+        return jsonify({
+            "status": "error",
+            "message": "Unable to retrieve stock history."
         }), 500

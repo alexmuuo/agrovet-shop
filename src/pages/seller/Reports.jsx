@@ -358,6 +358,7 @@ function Reports() {
           { id: "sales", label: "Sales", icon: "bi-currency-exchange" },
           { id: "products", label: "Products", icon: "bi-box-seam" },
           { id: "deliveries", label: "Deliveries", icon: "bi-truck" },
+           { id: "profit", label: "Profit", icon: "bi-graph-up-arrow" },
         ].map((tab) => (
           <button
             key={tab.id}

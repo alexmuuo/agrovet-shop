@@ -78,7 +78,6 @@ class Order(db.Model):
         default="unpaid"
     )
 
-    # IMPORTANT:
     # Payment status must only change after payment has been
     # verified or manually confirmed by an authorized admin.
     #
@@ -233,7 +232,7 @@ class OrderItem(db.Model):
     )
 
     # --------------------------------------------------------
-    # QUANTITY AND PRICE
+    # QUANTITY AND PRICES
     # --------------------------------------------------------
 
     quantity = db.Column(
@@ -241,9 +240,22 @@ class OrderItem(db.Model):
         nullable=False
     )
 
+    # Selling price per unit at the time of the sale.
     price = db.Column(
         db.Numeric(10, 2),
         nullable=False
+    )
+
+    # Buying price per unit at the time of the sale.
+    #
+    # Nullable for compatibility with historical order items
+    # whose original buying price was not recorded.
+    #
+    # This value is a snapshot: changing the current product's
+    # buying price must not change the profit on an old sale.
+    buying_price = db.Column(
+        db.Numeric(10, 2),
+        nullable=True
     )
 
     # --------------------------------------------------------
@@ -278,15 +290,47 @@ class OrderItem(db.Model):
             ),
 
             "quantity": self.quantity,
+
+            # Selling price per unit.
             "price": (
                 float(self.price)
                 if self.price is not None
                 else 0.0
             ),
 
+            # Buying price per unit when it was recorded.
+            # None means the historical cost is unknown.
+            "buying_price": (
+                float(self.buying_price)
+                if self.buying_price is not None
+                else None
+            ),
+
+            # Total selling value of this line item.
             "subtotal": (
                 float(self.price * self.quantity)
                 if self.price is not None
                 else 0.0
             ),
+
+            # Total cost of this line item, if known.
+            "cost_subtotal": (
+                float(self.buying_price * self.quantity)
+                if self.buying_price is not None
+                else None
+            ),
+
+            # Profit for this line item, if its cost is known.
+            "gross_profit": (
+                float(
+                    (self.price - self.buying_price)
+                    * self.quantity
+                )
+                if (
+                    self.price is not None
+                    and self.buying_price is not None
+                )
+                else None
+            ),
         }
+

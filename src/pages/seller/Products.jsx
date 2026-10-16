@@ -19,28 +19,57 @@ function Products() {
     name: "",
     category: "",
     description: "",
+    buying_price: "",
     price: "",
     unit: "",
     stock: "",
     image: "",
   });
 
+  // Safely normalize values that may be strings, numbers, null or undefined.
+  const toInputValue = (value) => {
+    if (value === null || value === undefined) {
+      return "";
+    }
+
+    return String(value);
+  };
+
+  const formatMoney = (value) => {
+    const amount = Number(value);
+
+    if (!Number.isFinite(amount)) {
+      return "0.00";
+    }
+
+    return amount.toLocaleString("en-KE", {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    });
+  };
+
   const fetchProducts = async () => {
     try {
       setLoading(true);
 
       const response = await api.get("/products");
-
       const data = response.data;
 
-      setProducts(
-        Array.isArray(data)
-          ? data
-          : data.products || data.data || []
-      );
+      const fetchedProducts = Array.isArray(data)
+        ? data
+        : Array.isArray(data?.products)
+        ? data.products
+        : Array.isArray(data?.data)
+        ? data.data
+        : [];
+
+      setProducts(fetchedProducts);
     } catch (error) {
       console.error("Failed to fetch products:", error);
-      alert("Failed to load products.");
+      alert(
+        error.response?.data?.message ||
+          "Failed to load products. Please try again."
+      );
     } finally {
       setLoading(false);
     }
@@ -50,7 +79,7 @@ function Products() {
     fetchProducts();
   }, []);
 
-  // Clean up temporary image previews when the component unmounts.
+  // Release temporary image-preview URLs when they are replaced or removed.
   useEffect(() => {
     return () => {
       if (imagePreview.startsWith("blob:")) {
@@ -67,7 +96,6 @@ function Products() {
       [name]: value,
     }));
 
-    // If the admin changes the image URL, update its preview.
     if (name === "image" && !selectedImage) {
       setImagePreview(value.trim());
       setImageError("");
@@ -83,33 +111,22 @@ function Products() {
 
     setImageError("");
 
-    // Accept image files only.
     if (!file.type.startsWith("image/")) {
       setImageError("Please select a valid image file.");
       event.target.value = "";
       return;
     }
 
-    // Limit uploads to 5 MB.
     if (file.size > 5 * 1024 * 1024) {
       setImageError(
         "The image is too large. Please select an image under 5 MB."
       );
-
       event.target.value = "";
       return;
     }
 
-    // Release an old temporary preview before creating another.
-    setImagePreview((previous) => {
-      if (previous.startsWith("blob:")) {
-        URL.revokeObjectURL(previous);
-      }
-
-      return URL.createObjectURL(file);
-    });
-
     setSelectedImage(file);
+    setImagePreview(URL.createObjectURL(file));
   };
 
   const removeSelectedImage = () => {
@@ -120,8 +137,7 @@ function Products() {
       fileInputRef.current.value = "";
     }
 
-    // Return to the existing URL, if there is one.
-    setImagePreview(formData.image.trim());
+    setImagePreview(toInputValue(formData.image).trim());
   };
 
   const resetForm = () => {
@@ -129,6 +145,7 @@ function Products() {
       name: "",
       category: "",
       description: "",
+      buying_price: "",
       price: "",
       unit: "",
       stock: "",
@@ -158,40 +175,96 @@ function Products() {
       return;
     }
 
-    if (Number(formData.price) < 0 || Number(formData.stock) < 0) {
-      alert("Price and stock cannot be negative.");
+    const priceText = toInputValue(formData.price).trim();
+    const buyingPriceText = toInputValue(
+      formData.buying_price
+    ).trim();
+    const stockText = toInputValue(formData.stock).trim();
+
+    const sellingPrice = Number(priceText);
+
+    const buyingPrice =
+      buyingPriceText === "" ? null : Number(buyingPriceText);
+
+    const stock = Number(stockText);
+
+    // Validate the selling price.
+    if (
+      priceText === "" ||
+      !Number.isFinite(sellingPrice) ||
+      sellingPrice < 0
+    ) {
+      alert("Please enter a valid, non-negative selling price.");
       return;
     }
 
-    if (!formData.name.trim() || !formData.category.trim()) {
+    // Validate the buying price if supplied.
+    if (
+      buyingPrice !== null &&
+      (!Number.isFinite(buyingPrice) || buyingPrice < 0)
+    ) {
+      alert("Please enter a valid, non-negative buying price.");
+      return;
+    }
+
+    // Validate stock.
+    if (
+      stockText === "" ||
+      !Number.isFinite(stock) ||
+      stock < 0
+    ) {
+      alert("Please enter a valid, non-negative stock quantity.");
+      return;
+    }
+
+    // A new product must have a buying price.
+    if (!editingProduct && buyingPrice === null) {
+      alert("Please enter the buying price for this product.");
+      return;
+    }
+
+    if (
+      !toInputValue(formData.name).trim() ||
+      !toInputValue(formData.category).trim()
+    ) {
       alert("Please enter the product name and category.");
+      return;
+    }
+
+    if (!toInputValue(formData.unit).trim()) {
+      alert("Please enter the product unit.");
+      return;
+    }
+
+    if (!Number.isInteger(stock)) {
+      alert("Stock must be a whole number.");
       return;
     }
 
     try {
       setSaving(true);
 
-      /*
-       * Send FormData so the backend can receive both:
-       * 1. Normal product fields.
-       * 2. An optional uploaded image file.
-       *
-       * The backend must be updated to support multipart/form-data.
-       */
-
       const productData = new FormData();
 
-      productData.append("name", formData.name.trim());
-      productData.append("category", formData.category.trim());
-      productData.append("description", formData.description);
-      productData.append("price", String(Number(formData.price)));
-      productData.append("unit", formData.unit.trim());
-      productData.append("stock", String(Number(formData.stock)));
+      productData.append("name", toInputValue(formData.name).trim());
+      productData.append(
+        "category",
+        toInputValue(formData.category).trim()
+      );
+      productData.append(
+        "description",
+        toInputValue(formData.description)
+      );
+      productData.append("price", String(sellingPrice));
+      productData.append("unit", toInputValue(formData.unit).trim());
+      productData.append("stock", String(stock));
+      productData.append("image", toInputValue(formData.image).trim());
 
-      // Keep the existing image URL option.
-      productData.append("image", formData.image.trim());
+      // Do not overwrite an existing buying price with an empty value.
+      if (buyingPrice !== null) {
+        productData.append("buying_price", String(buyingPrice));
+      }
 
-      // An uploaded image takes priority over the URL.
       if (selectedImage) {
         productData.append("image_file", selectedImage);
       }
@@ -225,27 +298,32 @@ function Products() {
   };
 
   const handleEdit = (product) => {
+    if (!product || product.id === null || product.id === undefined) {
+      alert("Unable to edit this product because its ID is missing.");
+      return;
+    }
+
     setEditingProduct(product);
 
     setFormData({
-      name: product.name || "",
-      category: product.category || "",
-      description: product.description || "",
-      price: product.price ?? "",
-      unit: product.unit || "",
-      stock: product.stock ?? "",
-      image: product.image || "",
+      name: toInputValue(product.name),
+      category: toInputValue(product.category),
+      description: toInputValue(product.description),
+      buying_price: toInputValue(product.buying_price),
+      price: toInputValue(product.price),
+      unit: toInputValue(product.unit),
+      stock: toInputValue(product.stock),
+      image: toInputValue(product.image),
     });
 
     setSelectedImage(null);
-    setImagePreview(product.image || "");
+    setImagePreview(toInputValue(product.image));
     setImageError("");
+    setShowForm(true);
 
     if (fileInputRef.current) {
       fileInputRef.current.value = "";
     }
-
-    setShowForm(true);
   };
 
   const handleDeactivate = async (product) => {
@@ -273,17 +351,31 @@ function Products() {
     }
   };
 
+  const buyingPriceText = toInputValue(
+    formData.buying_price
+  ).trim();
+
+  const sellingPriceText = toInputValue(formData.price).trim();
+
+  const hasValidPrices =
+    buyingPriceText !== "" &&
+    sellingPriceText !== "" &&
+    Number.isFinite(Number(buyingPriceText)) &&
+    Number.isFinite(Number(sellingPriceText));
+
+  const grossProfitPreview = hasValidPrices
+    ? Number(sellingPriceText) - Number(buyingPriceText)
+    : null;
+
   return (
     <div className="container py-4">
       {/* Header */}
       <div className="d-flex justify-content-between align-items-center mb-4 gap-3 flex-wrap">
         <div>
-          <h2 className="fw-bold mb-1">
-            Product Management
-          </h2>
+          <h2 className="fw-bold mb-1">Product Management</h2>
 
           <p className="text-muted mb-0">
-            Add, edit and manage your agrovet products.
+            Manage products, buying costs, selling prices and stock.
           </p>
         </div>
 
@@ -309,9 +401,7 @@ function Products() {
               <div className="row g-3">
                 {/* Product name */}
                 <div className="col-md-6">
-                  <label className="form-label">
-                    Product Name
-                  </label>
+                  <label className="form-label">Product Name</label>
 
                   <input
                     type="text"
@@ -325,9 +415,7 @@ function Products() {
 
                 {/* Category */}
                 <div className="col-md-6">
-                  <label className="form-label">
-                    Category
-                  </label>
+                  <label className="form-label">Category</label>
 
                   <input
                     type="text"
@@ -340,10 +428,33 @@ function Products() {
                   />
                 </div>
 
-                {/* Price */}
+                {/* Buying price */}
                 <div className="col-md-4">
                   <label className="form-label">
-                    Price (KSh)
+                    Buying Price (KSh)
+                  </label>
+
+                  <input
+                    type="number"
+                    name="buying_price"
+                    className="form-control"
+                    value={formData.buying_price}
+                    onChange={handleChange}
+                    min="0"
+                    step="0.01"
+                    placeholder="Cost to the business"
+                    required={!editingProduct}
+                  />
+
+                  <small className="text-muted">
+                    What the agrovet pays to purchase one unit.
+                  </small>
+                </div>
+
+                {/* Selling price */}
+                <div className="col-md-4">
+                  <label className="form-label">
+                    Selling Price (KSh)
                   </label>
 
                   <input
@@ -356,13 +467,15 @@ function Products() {
                     step="0.01"
                     required
                   />
+
+                  <small className="text-muted">
+                    The price charged to customers.
+                  </small>
                 </div>
 
                 {/* Unit */}
                 <div className="col-md-4">
-                  <label className="form-label">
-                    Unit
-                  </label>
+                  <label className="form-label">Unit</label>
 
                   <input
                     type="text"
@@ -377,9 +490,7 @@ function Products() {
 
                 {/* Stock */}
                 <div className="col-md-4">
-                  <label className="form-label">
-                    Stock
-                  </label>
+                  <label className="form-label">Stock</label>
 
                   <input
                     type="number"
@@ -393,11 +504,27 @@ function Products() {
                   />
                 </div>
 
+                {/* Gross profit preview */}
+                <div className="col-md-8">
+                  <label className="form-label">
+                    Gross Profit per Unit
+                  </label>
+
+                  <div className="form-control bg-light">
+                    {grossProfitPreview !== null
+                      ? `KSh ${formatMoney(grossProfitPreview)}`
+                      : "Enter both prices to calculate"}
+                  </div>
+
+                  <small className="text-muted">
+                    Selling price minus buying price. This is not net
+                    profit.
+                  </small>
+                </div>
+
                 {/* Description */}
                 <div className="col-12">
-                  <label className="form-label">
-                    Description
-                  </label>
+                  <label className="form-label">Description</label>
 
                   <textarea
                     name="description"
@@ -408,7 +535,7 @@ function Products() {
                   />
                 </div>
 
-                {/* Device image upload */}
+                {/* Image upload */}
                 <div className="col-12">
                   <label className="form-label fw-semibold">
                     Upload Product Image
@@ -484,7 +611,7 @@ function Products() {
                   </div>
                 </div>
 
-                {/* Existing image URL option */}
+                {/* Image URL */}
                 <div className="col-12">
                   <label className="form-label fw-semibold">
                     Or Use an Image URL
@@ -506,7 +633,7 @@ function Products() {
                 </div>
               </div>
 
-              {/* Buttons */}
+              {/* Form actions */}
               <div className="mt-4 d-flex gap-2 flex-wrap">
                 <button
                   type="submit"
@@ -549,10 +676,8 @@ function Products() {
       {/* Products table */}
       <div className="card shadow-sm">
         <div className="card-body">
-          <div className="d-flex justify-content-between align-items-center mb-3">
-            <h5 className="fw-bold mb-0">
-              Products
-            </h5>
+          <div className="d-flex justify-content-between align-items-center mb-3 gap-2 flex-wrap">
+            <h5 className="fw-bold mb-0">Products</h5>
 
             <span className="badge bg-secondary">
               {products.length} products
@@ -566,17 +691,13 @@ function Products() {
                 role="status"
               ></div>
 
-              <p className="mt-2 text-muted">
-                Loading products...
-              </p>
+              <p className="mt-2 text-muted">Loading products...</p>
             </div>
           ) : products.length === 0 ? (
             <div className="text-center py-5">
               <i className="bi bi-box-seam fs-1 text-muted"></i>
 
-              <p className="text-muted mt-3">
-                No products found.
-              </p>
+              <p className="text-muted mt-3">No products found.</p>
 
               <button
                 type="button"
@@ -593,7 +714,9 @@ function Products() {
                   <tr>
                     <th>Product</th>
                     <th>Category</th>
-                    <th>Price</th>
+                    <th>Buying Price</th>
+                    <th>Selling Price</th>
+                    <th>Gross Profit / Unit</th>
                     <th>Unit</th>
                     <th>Stock</th>
                     <th>Status</th>
@@ -602,100 +725,144 @@ function Products() {
                 </thead>
 
                 <tbody>
-                  {products.map((product) => (
-                    <tr key={product.id}>
-                      <td>
-                        <div className="d-flex align-items-center gap-2">
-                          {product.image ? (
-                            <img
-                              src={product.image}
-                              alt={product.name}
-                              onError={(event) => {
-                                event.currentTarget.style.visibility =
-                                  "hidden";
-                              }}
-                              style={{
-                                width: "50px",
-                                height: "50px",
-                                objectFit: "cover",
-                                borderRadius: "8px",
-                              }}
-                            />
+                  {products.map((product) => {
+                    const hasBuyingPrice =
+                      product.buying_price !== null &&
+                      product.buying_price !== undefined &&
+                      product.buying_price !== "";
+
+                    const sellingPrice = Number(product.price);
+                    const buyingPrice = Number(product.buying_price);
+
+                    const grossProfit =
+                      hasBuyingPrice &&
+                      Number.isFinite(sellingPrice) &&
+                      Number.isFinite(buyingPrice)
+                        ? sellingPrice - buyingPrice
+                        : null;
+
+                    const stock = Number(product.stock);
+
+                    return (
+                      <tr key={product.id}>
+                        <td>
+                          <div className="d-flex align-items-center gap-2">
+                            {product.image ? (
+                              <img
+                                src={product.image}
+                                alt={product.name || "Product"}
+                                onError={(event) => {
+                                  event.currentTarget.style.visibility =
+                                    "hidden";
+                                }}
+                                style={{
+                                  width: "50px",
+                                  height: "50px",
+                                  objectFit: "cover",
+                                  borderRadius: "8px",
+                                }}
+                              />
+                            ) : (
+                              <div
+                                className="bg-light d-flex align-items-center justify-content-center"
+                                style={{
+                                  width: "50px",
+                                  height: "50px",
+                                  borderRadius: "8px",
+                                }}
+                              >
+                                <i className="bi bi-box"></i>
+                              </div>
+                            )}
+
+                            <strong>{product.name}</strong>
+                          </div>
+                        </td>
+
+                        <td>{product.category}</td>
+
+                        <td>
+                          {hasBuyingPrice ? (
+                            `KSh ${formatMoney(product.buying_price)}`
                           ) : (
-                            <div
-                              className="bg-light d-flex align-items-center justify-content-center"
-                              style={{
-                                width: "50px",
-                                height: "50px",
-                                borderRadius: "8px",
-                              }}
-                            >
-                              <i className="bi bi-box"></i>
-                            </div>
+                            <span className="badge bg-warning text-dark">
+                              Not set
+                            </span>
                           )}
+                        </td>
 
-                          <strong>{product.name}</strong>
-                        </div>
-                      </td>
+                        <td>KSh {formatMoney(product.price)}</td>
 
-                      <td>{product.category}</td>
+                        <td>
+                          {grossProfit === null ? (
+                            <span className="text-muted">—</span>
+                          ) : (
+                            <span
+                              className={
+                                grossProfit < 0
+                                  ? "text-danger fw-semibold"
+                                  : grossProfit > 0
+                                  ? "text-success fw-semibold"
+                                  : "text-muted fw-semibold"
+                              }
+                            >
+                              KSh {formatMoney(grossProfit)}
+                            </span>
+                          )}
+                        </td>
 
-                      <td>
-                        KSh{" "}
-                        {Number(product.price).toLocaleString()}
-                      </td>
+                        <td>{product.unit}</td>
 
-                      <td>{product.unit}</td>
-
-                      <td>
-                        <span
-                          className={
-                            product.stock <= 5
-                              ? "badge bg-danger"
-                              : product.stock <= 10
-                              ? "badge bg-warning text-dark"
-                              : "badge bg-success"
-                          }
-                        >
-                          {product.stock}
-                        </span>
-                      </td>
-
-                      <td>
-                        {product.is_active ? (
-                          <span className="badge bg-success">
-                            Active
-                          </span>
-                        ) : (
-                          <span className="badge bg-secondary">
-                            Inactive
-                          </span>
-                        )}
-                      </td>
-
-                      <td>
-                        <div className="d-flex gap-2">
-                          <button
-                            type="button"
-                            className="btn btn-sm btn-outline-primary"
-                            onClick={() => handleEdit(product)}
-                            title="Edit product"
+                        <td>
+                          <span
+                            className={
+                              !Number.isFinite(stock) || stock <= 5
+                                ? "badge bg-danger"
+                                : stock <= 10
+                                ? "badge bg-warning text-dark"
+                                : "badge bg-success"
+                            }
                           >
-                            <i className="bi bi-pencil"></i>
-                          </button>
+                            {product.stock}
+                          </span>
+                        </td>
 
-                          <button
-                            type="button"
-                            className="btn btn-sm btn-outline-danger"
-                            onClick={() => handleDeactivate(product)}
-                            title="Deactivate product"
-                          >
-                            <i className="bi bi-trash"></i>
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
+                        <td>
+                          {product.is_active ? (
+                            <span className="badge bg-success">
+                              Active
+                            </span>
+                          ) : (
+                            <span className="badge bg-secondary">
+                              Inactive
+                            </span>
+                          )}
+                        </td>
+
+                        <td>
+                          <div className="d-flex gap-2">
+                            <button
+                              type="button"
+                              className="btn btn-sm btn-outline-primary"
+                              onClick={() => handleEdit(product)}
+                              title="Edit product"
+                            >
+                              <i className="bi bi-pencil"></i>
+                            </button>
+
+                            <button
+                              type="button"
+                              className="btn btn-sm btn-outline-danger"
+                              onClick={() => handleDeactivate(product)}
+                              title="Deactivate product"
+                            >
+                              <i className="bi bi-trash"></i>
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
