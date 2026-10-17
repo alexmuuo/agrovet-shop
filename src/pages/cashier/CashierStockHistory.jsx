@@ -1,19 +1,61 @@
 import { useCallback, useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import axios from "axios";
 
 const API_BASE = "https://agrovet-api-a00w.onrender.com/api";
+const LIMIT = 50;
 
 function formatDate(value) {
 if (!value) return "—";
 
 const date = new Date(value);
 
-if (Number.isNaN(date.getTime())) return value;
+if (Number.isNaN(date.getTime())) {
+return String(value);
+}
 
 return date.toLocaleString("en-KE", {
 dateStyle: "medium",
 timeStyle: "short",
 });
+}
+
+function getAuthHeaders() {
+const token = localStorage.getItem("cashierToken");
+
+return {
+Authorization: `Bearer ${token}`,
+};
+}
+
+function getRecords(data) {
+// Some APIs return the records directly as an array.
+if (Array.isArray(data)) {
+return data;
+}
+
+if (!data || typeof data !== "object") {
+return null;
+}
+
+// Support common response property names, including "history".
+const possibleRecords = [
+data.history,
+data.movements,
+data.stock_movements,
+data.stockMovements,
+data.records,
+data.items,
+data.results,
+];
+
+for (const records of possibleRecords) {
+if (Array.isArray(records)) {
+return records;
+}
+}
+
+return null;
 }
 
 export default function CashierStockHistory() {
@@ -23,14 +65,16 @@ const [error, setError] = useState("");
 const [offset, setOffset] = useState(0);
 const [total, setTotal] = useState(0);
 
-const limit = 50;
-
 const fetchHistory = useCallback(async () => {
 const token = localStorage.getItem("cashierToken");
 
 
 if (!token) {
-  setError("Your cashier session has expired. Please log in again.");
+  setMovements([]);
+  setTotal(0);
+  setError(
+    "Your cashier session has expired. Please log in again."
+  );
   setLoading(false);
   return;
 }
@@ -42,37 +86,59 @@ try {
   const response = await axios.get(
     `${API_BASE}/cashier/stock/history`,
     {
-      headers: {
-        Authorization: `Bearer ${token}`,
-      },
+      headers: getAuthHeaders(),
       params: {
-        limit,
+        limit: LIMIT,
         offset,
       },
     }
   );
 
   const data = response.data;
+  const records = getRecords(data);
 
-  // Support either a direct array or a paginated response.
-  const records = Array.isArray(data)
-    ? data
-    : data.movements ??
-      data.stock_movements ??
-      data.records ??
-      data.items ??
-      [];
+  // Don't silently display an empty history if the API
+  // returns an unexpected response structure.
+  if (records === null) {
+    console.error(
+      "Unexpected cashier stock history response:",
+      data
+    );
+
+    setMovements([]);
+    setTotal(0);
+    setError(
+      "The server returned an unexpected stock history response. Please check the backend response format."
+    );
+
+    return;
+  }
 
   setMovements(records);
+
+  const reportedTotal =
+    data && !Array.isArray(data)
+      ? Number(data.total ?? data.count)
+      : records.length;
+
   setTotal(
-    Number.isFinite(Number(data.total))
-      ? Number(data.total)
+    Number.isFinite(reportedTotal) && reportedTotal >= 0
+      ? reportedTotal
       : records.length
   );
 } catch (err) {
-  console.error("Failed to load stock history:", err);
+  console.error(
+    "Failed to load cashier stock history:",
+    err
+  );
 
-  if (err.response?.status === 401 || err.response?.status === 403) {
+  setMovements([]);
+  setTotal(0);
+
+  if (
+    err.response?.status === 401 ||
+    err.response?.status === 403
+  ) {
     setError(
       "Your cashier session is invalid or expired. Please log in again."
     );
@@ -80,7 +146,7 @@ try {
     setError(
       err.response?.data?.message ||
         err.response?.data?.error ||
-        "Could not load stock history. Check that the backend is running."
+        "Could not load stock history. Please check your connection and try again."
     );
   }
 } finally {
@@ -94,21 +160,31 @@ useEffect(() => {
 fetchHistory();
 }, [fetchHistory]);
 
-const currentPage = Math.floor(offset / limit) + 1;
-const totalPages = Math.max(1, Math.ceil(total / limit));
+const currentPage = Math.floor(offset / LIMIT) + 1;
+const totalPages = Math.max(1, Math.ceil(total / LIMIT));
 
 const totalUnitsAdded = movements.reduce(
-(sum, movement) => sum + (Number(movement.quantity_added) || 0),
+(sum, movement) =>
+sum + (Number(movement.quantity_added) || 0),
 0
 );
 
-return ( <div className="container py-4"> <div className="d-flex flex-wrap justify-content-between align-items-center gap-3 mb-4"> <div> <h2 className="mb-1">My Stock History</h2> <p className="text-muted mb-0">
-Review the stock you have added to the inventory. </p> </div>
+return ( <main className="container py-4"> <div className="d-flex flex-wrap justify-content-between align-items-center gap-3 mb-4"> <div> <h1 className="h2 mb-1">My Stock History</h1>
 
-    <div className="d-flex gap-2">
-      <a href="/cashier/stock" className="btn btn-outline-success">
+
+      <p className="text-muted mb-0">
+        Review the stock you have added to the inventory.
+      </p>
+    </div>
+
+    <div className="d-flex flex-wrap gap-2">
+      <Link
+        to="/cashier/stock"
+        className="btn btn-outline-success"
+      >
+        <i className="bi bi-plus-circle me-1" />
         Add Stock
-      </a>
+      </Link>
 
       <button
         type="button"
@@ -116,6 +192,14 @@ Review the stock you have added to the inventory. </p> </div>
         onClick={fetchHistory}
         disabled={loading}
       >
+        <i
+          className={`bi ${
+            loading
+              ? "bi-arrow-repeat"
+              : "bi-arrow-clockwise"
+          } me-1`}
+        />
+
         {loading ? "Refreshing..." : "Refresh"}
       </button>
     </div>
@@ -124,7 +208,16 @@ Review the stock you have added to the inventory. </p> </div>
   {error && (
     <div className="alert alert-danger" role="alert">
       <strong>Unable to load history.</strong>
-      <div>{error}</div>
+      <div className="mt-1">{error}</div>
+
+      <button
+        type="button"
+        className="btn btn-sm btn-outline-danger mt-3"
+        onClick={fetchHistory}
+        disabled={loading}
+      >
+        Try Again
+      </button>
     </div>
   )}
 
@@ -132,8 +225,13 @@ Review the stock you have added to the inventory. </p> </div>
     <div className="col-12 col-md-6">
       <div className="card border-0 shadow-sm h-100">
         <div className="card-body">
-          <div className="text-muted small">Recorded Restock Entries</div>
-          <div className="fs-3 fw-bold">{total}</div>
+          <div className="text-muted small">
+            Recorded Restock Entries
+          </div>
+
+          <div className="fs-3 fw-bold">
+            {total}
+          </div>
         </div>
       </div>
     </div>
@@ -144,7 +242,10 @@ Review the stock you have added to the inventory. </p> </div>
           <div className="text-muted small">
             Units Added on This Page
           </div>
-          <div className="fs-3 fw-bold">{totalUnitsAdded}</div>
+
+          <div className="fs-3 fw-bold">
+            {totalUnitsAdded}
+          </div>
         </div>
       </div>
     </div>
@@ -152,7 +253,9 @@ Review the stock you have added to the inventory. </p> </div>
 
   <div className="card border-0 shadow-sm">
     <div className="card-header bg-white py-3">
-      <h5 className="mb-0">Stock Movement Records</h5>
+      <h2 className="h5 mb-0">
+        Stock Movement Records
+      </h2>
     </div>
 
     <div className="card-body p-0">
@@ -161,21 +264,40 @@ Review the stock you have added to the inventory. </p> </div>
           <div
             className="spinner-border text-success"
             role="status"
-            aria-label="Loading"
+            aria-label="Loading stock history"
           />
+
           <p className="text-muted mt-3 mb-0">
             Loading your stock history...
           </p>
         </div>
+      ) : error ? (
+        <div className="text-center py-5 px-3">
+          <i className="bi bi-exclamation-circle fs-2 text-danger" />
+
+          <p className="text-muted mt-2 mb-0">
+            Stock history could not be loaded.
+          </p>
+        </div>
       ) : movements.length === 0 ? (
         <div className="text-center py-5 px-3">
-          <h5>No stock entries yet</h5>
+          <i className="bi bi-inbox fs-1 text-secondary" />
+
+          <h3 className="h5 mt-3">
+            No stock entries yet
+          </h3>
+
           <p className="text-muted">
-            When you add stock, your recorded movements will appear here.
+            When you add stock, your recorded movements
+            will appear here.
           </p>
-          <a href="/cashier/stock" className="btn btn-success">
+
+          <Link
+            to="/cashier/stock"
+            className="btn btn-success"
+          >
             Add Stock
-          </a>
+          </Link>
         </div>
       ) : (
         <div className="table-responsive">
@@ -193,26 +315,46 @@ Review the stock you have added to the inventory. </p> </div>
             </thead>
 
             <tbody>
-              {movements.map((movement) => (
-                <tr key={movement.id}>
+              {movements.map((movement, index) => (
+                <tr
+                  key={
+                    movement.id ??
+                    `${movement.product_id}-${movement.created_at}-${index}`
+                  }
+                >
                   <td className="text-nowrap">
-                    {formatDate(movement.created_at)}
+                    {formatDate(
+                      movement.created_at ??
+                        movement.timestamp ??
+                        movement.date
+                    )}
                   </td>
 
                   <td>
                     <div className="fw-semibold">
-                      {movement.product_name || "Unknown product"}
+                      {movement.product_name ||
+                        movement.product?.name ||
+                        "Unknown product"}
                     </div>
+
                     <small className="text-muted">
-                      Product ID: {movement.product_id ?? "—"}
+                      Product ID:{" "}
+                      {movement.product_id ??
+                        movement.product?.id ??
+                        "—"}
                     </small>
                   </td>
 
-                  <td>{movement.previous_stock ?? "—"}</td>
+                  <td>
+                    {movement.previous_stock ?? "—"}
+                  </td>
 
                   <td>
                     <span className="badge text-bg-success">
-                      +{movement.quantity_added ?? 0}
+                      +
+                      {movement.quantity_added ??
+                        movement.quantity ??
+                        0}
                     </span>
                   </td>
 
@@ -220,7 +362,9 @@ Review the stock you have added to the inventory. </p> </div>
                     {movement.new_stock ?? "—"}
                   </td>
 
-                  <td>{movement.reference || "—"}</td>
+                  <td>
+                    {movement.reference || "—"}
+                  </td>
 
                   <td
                     style={{
@@ -240,50 +384,59 @@ Review the stock you have added to the inventory. </p> </div>
       )}
     </div>
 
-    {!loading && movements.length > 0 && (
-      <div className="card-footer bg-white d-flex flex-wrap justify-content-between align-items-center gap-2">
-        <small className="text-muted">
-          Showing {offset + 1}–
-          {offset + movements.length} of {total} entries
-        </small>
+    {!loading &&
+      !error &&
+      movements.length > 0 && (
+        <div className="card-footer bg-white d-flex flex-wrap justify-content-between align-items-center gap-2">
+          <small className="text-muted">
+            Showing {offset + 1}–
+            {offset + movements.length} of {total} entries
+          </small>
 
-        <div className="d-flex align-items-center gap-2">
-          <button
-            type="button"
-            className="btn btn-outline-secondary btn-sm"
-            disabled={offset === 0 || loading}
-            onClick={() => setOffset((previous) => Math.max(0, previous - limit))}
-          >
-            Previous
-          </button>
+          <div className="d-flex align-items-center gap-2">
+            <button
+              type="button"
+              className="btn btn-outline-secondary btn-sm"
+              disabled={offset === 0 || loading}
+              onClick={() =>
+                setOffset((previous) =>
+                  Math.max(0, previous - LIMIT)
+                )
+              }
+            >
+              Previous
+            </button>
 
-          <span className="small text-muted">
-            Page {currentPage} of {totalPages}
-          </span>
+            <span className="small text-muted">
+              Page {currentPage} of {totalPages}
+            </span>
 
-          <button
-            type="button"
-            className="btn btn-outline-secondary btn-sm"
-            disabled={
-              loading ||
-              movements.length < limit ||
-              offset + movements.length >= total
-            }
-            onClick={() => setOffset((previous) => previous + limit)}
-          >
-            Next
-          </button>
+            <button
+              type="button"
+              className="btn btn-outline-secondary btn-sm"
+              disabled={
+                loading ||
+                movements.length < LIMIT ||
+                offset + movements.length >= total
+              }
+              onClick={() =>
+                setOffset((previous) => previous + LIMIT)
+              }
+            >
+              Next
+            </button>
+          </div>
         </div>
-      </div>
-    )}
+      )}
   </div>
 
   <div className="alert alert-info mt-4 mb-0">
-    <strong>Accountability note:</strong> This page displays stock
-    movements recorded for your cashier account. These records are intended
-    to provide an audit trail, not to edit the product's stock directly.
+    <strong>Accountability note:</strong> This page displays
+    stock movements recorded for your cashier account.
+    These records provide an audit trail and cannot be edited
+    from this page.
   </div>
-</div>
+</main>
 
 
 );
