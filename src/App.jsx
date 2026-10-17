@@ -40,6 +40,7 @@ import SalesHistory from "./pages/cashier/SalesHistory";
 import CashierOrders from "./pages/cashier/CashierOrders";
 import CashierDeliveries from "./pages/cashier/CashierDeliveries";
 import CashierStockHistory from "./pages/cashier/CashierStockHistory";
+import CashierStock from "./pages/cashier/CashierStock";
 
 // Route protection
 import AdminProtectedRoute from "./components/AdminProtectedRoute";
@@ -234,6 +235,10 @@ function App() {
             element={<CashierStockHistory />}
           />
         </Route>
+        <Route
+  path="/cashier/stock"
+  element={<CashierStock />}
+/>
       </Routes>
     </>
   );
