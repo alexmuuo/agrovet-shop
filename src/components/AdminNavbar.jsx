@@ -51,10 +51,7 @@ const loadUnreadMessageCount = async () => {
 
 loadUnreadMessageCount();
 
-const interval = setInterval(
-  loadUnreadMessageCount,
-  3000
-);
+const interval = setInterval(loadUnreadMessageCount, 3000);
 
 return () => {
   cancelled = true;
@@ -77,6 +74,7 @@ setUnreadMessageCount(0);
 
 navigate("/admin-login", { replace: true });
 
+
 };
 
 // =========================================================
@@ -85,7 +83,7 @@ navigate("/admin-login", { replace: true });
 
 return ( <nav className="navbar navbar-expand-lg navbar-dark bg-dark sticky-top"> <div className="container-fluid px-3 px-lg-4">
 
-
+```
     {/* ADMIN BRAND */}
 
     <Link
@@ -131,16 +129,34 @@ return ( <nav className="navbar navbar-expand-lg navbar-dark bg-dark sticky-top"
         {/* PRODUCTS */}
 
         <li className="nav-item">
-          <Link className="nav-link" to="/admin/products">
+          <Link
+            className="nav-link"
+            to="/admin/products"
+          >
             <i className="bi bi-box-seam me-1"></i>
             Products
+          </Link>
+        </li>
+
+        {/* BRANCHES */}
+
+        <li className="nav-item">
+          <Link
+            className="nav-link"
+            to="/admin/branches"
+          >
+            <i className="bi bi-shop me-1"></i>
+            Branches
           </Link>
         </li>
 
         {/* INVENTORY */}
 
         <li className="nav-item">
-          <Link className="nav-link" to="/admin/inventory">
+          <Link
+            className="nav-link"
+            to="/admin/inventory"
+          >
             <i className="bi bi-clipboard-data me-1"></i>
             Inventory
           </Link>
@@ -161,16 +177,34 @@ return ( <nav className="navbar navbar-expand-lg navbar-dark bg-dark sticky-top"
         {/* ORDERS */}
 
         <li className="nav-item">
-          <Link className="nav-link" to="/admin/orders">
+          <Link
+            className="nav-link"
+            to="/admin/orders"
+          >
             <i className="bi bi-receipt me-1"></i>
             Orders
+          </Link>
+        </li>
+
+        {/* SALES */}
+
+        <li className="nav-item">
+          <Link
+            className="nav-link"
+            to="/admin/sales"
+          >
+            <i className="bi bi-cash-stack me-1"></i>
+            Sales
           </Link>
         </li>
 
         {/* DELIVERY MANAGEMENT */}
 
         <li className="nav-item">
-          <Link className="nav-link" to="/admin/deliveries">
+          <Link
+            className="nav-link"
+            to="/admin/deliveries"
+          >
             <i className="bi bi-truck me-1"></i>
             Deliveries
           </Link>
@@ -179,7 +213,10 @@ return ( <nav className="navbar navbar-expand-lg navbar-dark bg-dark sticky-top"
         {/* CUSTOMERS */}
 
         <li className="nav-item">
-          <Link className="nav-link" to="/admin/customers">
+          <Link
+            className="nav-link"
+            to="/admin/customers"
+          >
             <i className="bi bi-people me-1"></i>
             Customers
           </Link>
@@ -188,7 +225,10 @@ return ( <nav className="navbar navbar-expand-lg navbar-dark bg-dark sticky-top"
         {/* REPORTS & ANALYTICS */}
 
         <li className="nav-item">
-          <Link className="nav-link" to="/admin/reports">
+          <Link
+            className="nav-link"
+            to="/admin/reports"
+          >
             <i className="bi bi-graph-up-arrow me-1"></i>
             Reports
           </Link>
@@ -246,6 +286,7 @@ return ( <nav className="navbar navbar-expand-lg navbar-dark bg-dark sticky-top"
     </div>
   </div>
 </nav>
+
 
 );
 }

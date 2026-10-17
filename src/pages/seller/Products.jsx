@@ -423,7 +423,7 @@ function Products() {
                     className="form-control"
                     value={formData.category}
                     onChange={handleChange}
-                    placeholder="e.g. Animal Health"
+                    placeholder="e.g. whiskey, beer, wine, spirits"
                     required
                   />
                 </div>
@@ -483,7 +483,7 @@ function Products() {
                     className="form-control"
                     value={formData.unit}
                     onChange={handleChange}
-                    placeholder="e.g. 50kg bag"
+                    placeholder="e.g. 750ml, 1L, 500g, 1kg, 1 pack"
                     required
                   />
                 </div>

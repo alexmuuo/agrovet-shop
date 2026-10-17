@@ -2,934 +2,1071 @@ import { useCallback, useEffect, useState } from "react";
 import api from "../../api/api";
 
 function Reports() {
-  const [overview, setOverview] = useState(null);
-  const [sales, setSales] = useState(null);
-  const [products, setProducts] = useState(null);
-  const [deliveries, setDeliveries] = useState(null);
+const [overview, setOverview] = useState(null);
+const [sales, setSales] = useState(null);
+const [products, setProducts] = useState(null);
+const [deliveries, setDeliveries] = useState(null);
+const [profit, setProfit] = useState(null);
 
-  const [startDate, setStartDate] = useState("");
-  const [endDate, setEndDate] = useState("");
+const [posOverview, setPosOverview] = useState(null);
+const [posSales, setPosSales] = useState(null);
+const [posProducts, setPosProducts] = useState(null);
+const [branchReports, setBranchReports] = useState([]);
 
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
+const [startDate, setStartDate] = useState("");
+const [endDate, setEndDate] = useState("");
 
-  const [activeReport, setActiveReport] = useState("overview");
+const [loading, setLoading] = useState(true);
+const [error, setError] = useState("");
+const [posError, setPosError] = useState("");
 
-  // =========================================================
-  // HELPERS
-  // =========================================================
+const [activeReport, setActiveReport] = useState("overview");
 
-  const formatMoney = (amount) =>
-    new Intl.NumberFormat("en-KE", {
-      style: "currency",
-      currency: "KES",
-      maximumFractionDigits: 2,
-    }).format(Number(amount) || 0);
+// =========================================================
+// HELPERS
+// =========================================================
 
-  const formatNumber = (number) =>
-    new Intl.NumberFormat("en-KE").format(Number(number) || 0);
+const formatMoney = (amount) =>
+new Intl.NumberFormat("en-KE", {
+style: "currency",
+currency: "KES",
+maximumFractionDigits: 2,
+}).format(Number(amount) || 0);
 
-  const formatDate = (date) => {
-    if (!date) return "—";
+const formatNumber = (number) =>
+new Intl.NumberFormat("en-KE").format(Number(number) || 0);
 
-    const parsedDate = new Date(date);
+const formatDate = (date) => {
+if (!date) return "—";
 
-    if (Number.isNaN(parsedDate.getTime())) {
-      return date;
-    }
 
-    return parsedDate.toLocaleDateString("en-KE", {
-      year: "numeric",
-      month: "short",
-      day: "numeric",
-    });
-  };
+const parsedDate = new Date(date);
 
-  const extractData = (response) => {
-    const data = response.data;
+if (Number.isNaN(parsedDate.getTime())) return date;
 
-    if (data?.status === "error") {
-      throw new Error(data.message || "Could not load report.");
-    }
+return parsedDate.toLocaleDateString("en-KE", {
+  year: "numeric",
+  month: "short",
+  day: "numeric",
+});
 
-    return data;
-  };
 
-  // =========================================================
-  // LOAD REPORTS
-  // =========================================================
+};
 
-  const loadReports = useCallback(async () => {
-    setLoading(true);
-    setError("");
+const extractData = (response) => {
+const data = response.data;
 
-    const params = {};
 
-    if (startDate) {
-      params.start_date = startDate;
-    }
+if (data?.status === "error") {
+  throw new Error(data.message || "Could not load report.");
+}
 
-    if (endDate) {
-      params.end_date = endDate;
-    }
+return data;
 
+
+};
+
+const getValue = (object, ...keys) => {
+for (const key of keys) {
+if (object?.[key] !== undefined && object?.[key] !== null) {
+return object[key];
+}
+}
+
+
+return 0;
+
+
+};
+
+const getArray = (object, ...keys) => {
+for (const key of keys) {
+if (Array.isArray(object?.[key])) {
+return object[key];
+}
+}
+
+
+return [];
+
+
+};
+
+const unwrap = (data, ...keys) => {
+for (const key of keys) {
+if (data?.[key] !== undefined && data?.[key] !== null) {
+return data[key];
+}
+}
+
+
+return data || {};
+
+
+};
+
+// =========================================================
+// LOAD REPORTS
+// Website reports remain separate from POS sales.
+// POS requests are independent so missing POS endpoints
+// cannot prevent website reports from loading.
+// =========================================================
+
+const loadReports = useCallback(async () => {
+setLoading(true);
+setError("");
+setPosError("");
+
+
+const params = {};
+
+if (startDate) params.start_date = startDate;
+if (endDate) params.end_date = endDate;
+
+const websiteRequests = await Promise.allSettled([
+  api.get("/admin/reports/overview", { params }),
+  api.get("/admin/reports/sales", { params }),
+  api.get("/admin/reports/products", { params }),
+  api.get("/admin/reports/deliveries", { params }),
+  api.get("/admin/reports/profit", { params }),
+]);
+
+const websiteSetters = [
+  setOverview,
+  setSales,
+  setProducts,
+  setDeliveries,
+  setProfit,
+];
+
+const websiteErrors = [];
+
+websiteRequests.forEach((result, index) => {
+  if (result.status === "fulfilled") {
     try {
-      const [
-        overviewResponse,
-        salesResponse,
-        productsResponse,
-        deliveriesResponse,
-      ] = await Promise.all([
-        api.get("/admin/reports/overview", { params }),
-        api.get("/admin/reports/sales", { params }),
-        api.get("/admin/reports/products", { params }),
-        api.get("/admin/reports/deliveries", { params }),
-      ]);
-
-      setOverview(extractData(overviewResponse));
-      setSales(extractData(salesResponse));
-      setProducts(extractData(productsResponse));
-      setDeliveries(extractData(deliveriesResponse));
+      websiteSetters[index](extractData(result.value));
     } catch (err) {
-      console.error(
-        "Could not load reports:",
-        err.response?.data || err.message
-      );
-
-      setError(
-        err.response?.data?.message ||
-          "Unable to load reports. Please try again later."
-      );
-    } finally {
-      setLoading(false);
+      websiteErrors.push(err.message);
     }
-  }, [startDate, endDate]);
-
-  useEffect(() => {
-    loadReports();
-  }, [loadReports]);
-
-  // =========================================================
-  // REPORT DATA HELPERS
-  // =========================================================
-
-  const getValue = (object, ...keys) => {
-    for (const key of keys) {
-      if (object?.[key] !== undefined && object?.[key] !== null) {
-        return object[key];
-      }
-    }
-
-    return 0;
-  };
-
-  const getArray = (object, ...keys) => {
-    for (const key of keys) {
-      if (Array.isArray(object?.[key])) {
-        return object[key];
-      }
-    }
-
-    return [];
-  };
-
-  const overviewData = overview?.overview || overview?.data || overview || {};
-  const salesData = sales?.sales || sales?.data || sales || {};
-  const productsData =
-    products?.products || products?.data || products || {};
-  const deliveriesData =
-    deliveries?.deliveries || deliveries?.data || deliveries || {};
-
-  const productList = Array.isArray(productsData)
-    ? productsData
-    : getArray(
-        productsData,
-        "top_products",
-        "best_selling_products",
-        "products",
-        "items"
-      );
-
-  const salesList = Array.isArray(salesData)
-    ? salesData
-    : getArray(
-        salesData,
-        "daily_sales",
-        "sales_by_date",
-        "sales",
-        "items"
-      );
-
-  const deliveryList = Array.isArray(deliveriesData)
-    ? deliveriesData
-    : getArray(
-        deliveriesData,
-        "delivery_statuses",
-        "status_breakdown",
-        "deliveries",
-        "items"
-      );
-
-  // =========================================================
-  // REPORT CARD
-  // =========================================================
-
-  const StatCard = ({ title, value, icon, color, subtitle }) => (
-    <div className="col-12 col-sm-6 col-xl-3">
-      <div className="card border-0 shadow-sm h-100">
-        <div className="card-body p-4">
-          <div className="d-flex justify-content-between align-items-start">
-            <div>
-              <p className="text-muted small mb-2">{title}</p>
-              <h3 className="fw-bold mb-2">{value}</h3>
-              {subtitle && (
-                <small className="text-muted">{subtitle}</small>
-              )}
-            </div>
-
-            <div
-              className={`rounded-3 bg-${color}-subtle text-${color} p-3`}
-            >
-              <i className={`bi ${icon} fs-4`}></i>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-
-  // =========================================================
-  // LOADING STATE
-  // =========================================================
-
-  if (loading && !overview && !sales && !products && !deliveries) {
-    return (
-      <div className="container-fluid p-4">
-        <div className="d-flex flex-column align-items-center justify-content-center py-5">
-          <div
-            className="spinner-border text-success mb-3"
-            role="status"
-          >
-            <span className="visually-hidden">Loading...</span>
-          </div>
-
-          <h5>Loading Reports & Analytics...</h5>
-          <p className="text-muted">
-            Please wait while we prepare your reports.
-          </p>
-        </div>
-      </div>
+  } else {
+    websiteErrors.push(
+      result.reason?.response?.data?.message ||
+        result.reason?.message ||
+        "A website report could not be loaded."
     );
   }
+});
 
-  // =========================================================
-  // MAIN DASHBOARD
-  // =========================================================
+if (websiteErrors.length) {
+  console.error("Website reports:", websiteErrors);
+  setError(websiteErrors[0]);
+}
 
-  return (
-    <div className="container-fluid p-3 p-md-4 bg-light min-vh-100">
-      {/* HEADER */}
+// POS reports use separate endpoints and separate sale records.
+const posRequests = await Promise.allSettled([
+  api.get("/admin/reports/pos/overview", { params }),
+  api.get("/admin/reports/pos/sales", { params }),
+  api.get("/admin/reports/pos/products", { params }),
+  api.get("/admin/reports/pos/branches", { params }),
+]);
 
-      <div className="d-flex flex-column flex-lg-row justify-content-between align-items-lg-center gap-3 mb-4">
-        <div>
-          <h2 className="fw-bold mb-1">
-            <i className="bi bi-graph-up-arrow text-success me-2"></i>
-            Reports & Analytics
-          </h2>
+const posSetters = [
+  setPosOverview,
+  setPosSales,
+  setPosProducts,
+  setBranchReports,
+];
 
-          <p className="text-muted mb-0">
-            Monitor sales, products, orders, and deliveries.
-          </p>
+const posErrors = [];
+
+posRequests.forEach((result, index) => {
+  if (result.status === "fulfilled") {
+    try {
+      const data = extractData(result.value);
+
+      if (index === 3) {
+        posSetters[index](
+          Array.isArray(data)
+            ? data
+            : getArray(data, "branches", "reports", "items")
+        );
+      } else {
+        posSetters[index](data);
+      }
+    } catch (err) {
+      posErrors.push(err.message);
+    }
+  } else {
+    posErrors.push(
+      result.reason?.response?.data?.message ||
+        result.reason?.message ||
+        "A POS report could not be loaded."
+    );
+  }
+});
+
+if (posErrors.length) {
+  console.error("POS reports:", posErrors);
+  setPosError(
+    "POS reports are not fully available yet. The corresponding backend report endpoints must be configured."
+  );
+}
+
+setLoading(false);
+
+
+}, [startDate, endDate]);
+
+useEffect(() => {
+loadReports();
+}, [loadReports]);
+
+// =========================================================
+// NORMALIZE RESPONSE DATA
+// =========================================================
+
+const overviewData = unwrap(overview, "overview", "data");
+const salesData = unwrap(sales, "sales", "data");
+const productsData = unwrap(products, "products", "data");
+const deliveriesData = unwrap(deliveries, "deliveries", "data");
+const profitData = unwrap(profit, "profit", "data");
+
+const posOverviewData = unwrap(posOverview, "overview", "data");
+const posSalesData = unwrap(posSales, "sales", "data");
+const posProductsData = unwrap(posProducts, "products", "data");
+
+const productList = Array.isArray(productsData)
+? productsData
+: getArray(
+productsData,
+"top_products",
+"best_selling_products",
+"products",
+"items"
+);
+
+const salesList = Array.isArray(salesData)
+? salesData
+: getArray(
+salesData,
+"daily_sales",
+"sales_by_date",
+"sales",
+"items"
+);
+
+const deliveryList = Array.isArray(deliveriesData)
+? deliveriesData
+: getArray(
+deliveriesData,
+"delivery_statuses",
+"status_breakdown",
+"deliveries",
+"items"
+);
+
+const posSalesList = Array.isArray(posSalesData)
+? posSalesData
+: getArray(
+posSalesData,
+"daily_sales",
+"sales_by_date",
+"sales",
+"items"
+);
+
+const posProductList = Array.isArray(posProductsData)
+? posProductsData
+: getArray(
+posProductsData,
+"top_products",
+"best_selling_products",
+"products",
+"items"
+);
+
+// =========================================================
+// REUSABLE COMPONENTS
+// =========================================================
+
+const StatCard = ({ title, value, icon, color, subtitle }) => ( <div className="col-12 col-sm-6 col-xl-3"> <div className="card border-0 shadow-sm h-100"> <div className="card-body p-4"> <div className="d-flex justify-content-between align-items-start gap-3"> <div> <p className="text-muted small mb-2">{title}</p> <h3 className="fw-bold mb-2">{value}</h3>
+{subtitle && ( <small className="text-muted">{subtitle}</small>
+)} </div>
+
+
+        <div className={`rounded-3 bg-${color}-subtle text-${color} p-3`}>
+          <i className={`bi ${icon} fs-4`}></i>
         </div>
-
-        <button
-          type="button"
-          className="btn btn-success"
-          onClick={loadReports}
-          disabled={loading}
-        >
-          <i
-            className={`bi ${
-              loading ? "bi-arrow-repeat" : "bi-arrow-clockwise"
-            } me-2`}
-          ></i>
-          {loading ? "Refreshing..." : "Refresh Reports"}
-        </button>
-      </div>
-
-      {/* DATE FILTERS */}
-
-      <div className="card border-0 shadow-sm mb-4">
-        <div className="card-body">
-          <div className="row g-3 align-items-end">
-            <div className="col-12 col-md-4">
-              <label
-                htmlFor="startDate"
-                className="form-label fw-semibold"
-              >
-                Start date
-              </label>
-
-              <input
-                id="startDate"
-                type="date"
-                className="form-control"
-                value={startDate}
-                max={endDate || undefined}
-                onChange={(event) => setStartDate(event.target.value)}
-              />
-            </div>
-
-            <div className="col-12 col-md-4">
-              <label
-                htmlFor="endDate"
-                className="form-label fw-semibold"
-              >
-                End date
-              </label>
-
-              <input
-                id="endDate"
-                type="date"
-                className="form-control"
-                value={endDate}
-                min={startDate || undefined}
-                onChange={(event) => setEndDate(event.target.value)}
-              />
-            </div>
-
-            <div className="col-12 col-md-4 d-flex gap-2">
-              <button
-                type="button"
-                className="btn btn-success flex-grow-1"
-                onClick={loadReports}
-                disabled={loading}
-              >
-                <i className="bi bi-funnel me-1"></i>
-                Apply Filters
-              </button>
-
-              <button
-                type="button"
-                className="btn btn-outline-secondary"
-                onClick={() => {
-                  setStartDate("");
-                  setEndDate("");
-                }}
-                title="Clear date filters"
-                aria-label="Clear date filters"
-              >
-                <i className="bi bi-x-lg"></i>
-              </button>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* ERROR MESSAGE */}
-
-      {error && (
-        <div
-          className="alert alert-danger d-flex align-items-start gap-2"
-          role="alert"
-        >
-          <i className="bi bi-exclamation-triangle-fill fs-5"></i>
-
-          <div>
-            <strong>Unable to load all reports.</strong>
-            <div>{error}</div>
-
-            <button
-              type="button"
-              className="btn btn-sm btn-outline-danger mt-2"
-              onClick={loadReports}
-            >
-              Try again
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* REPORT NAVIGATION */}
-
-      <div className="d-flex gap-2 flex-wrap mb-4">
-        {[
-          { id: "overview", label: "Overview", icon: "bi-speedometer2" },
-          { id: "sales", label: "Sales", icon: "bi-currency-exchange" },
-          { id: "products", label: "Products", icon: "bi-box-seam" },
-          { id: "deliveries", label: "Deliveries", icon: "bi-truck" },
-           { id: "profit", label: "Profit", icon: "bi-graph-up-arrow" },
-        ].map((tab) => (
-          <button
-            key={tab.id}
-            type="button"
-            className={`btn ${
-              activeReport === tab.id
-                ? "btn-success"
-                : "btn-outline-success"
-            }`}
-            onClick={() => setActiveReport(tab.id)}
-          >
-            <i className={`bi ${tab.icon} me-2`}></i>
-            {tab.label}
-          </button>
-        ))}
-      </div>
-
-      {loading && (
-        <div className="alert alert-info py-2">
-          <span
-            className="spinner-border spinner-border-sm me-2"
-            role="status"
-          ></span>
-          Updating report data...
-        </div>
-      )}
-
-      {/* OVERVIEW */}
-
-      {activeReport === "overview" && (
-        <>
-          <div className="row g-3 mb-4">
-            <StatCard
-              title="Total Orders"
-              value={formatNumber(
-                getValue(overviewData, "total_orders", "orders_count")
-              )}
-              icon="bi-receipt"
-              color="primary"
-              subtitle="Orders in the selected period"
-            />
-
-            <StatCard
-              title="Total Sales"
-              value={formatMoney(
-                getValue(
-                  overviewData,
-                  "total_sales",
-                  "total_revenue",
-                  "sales_total"
-                )
-              )}
-              icon="bi-currency-exchange"
-              color="success"
-              subtitle="Order value, not verified payments"
-            />
-
-            <StatCard
-              title="Customers"
-              value={formatNumber(
-                getValue(
-                  overviewData,
-                  "total_customers",
-                  "customers_count"
-                )
-              )}
-              icon="bi-people"
-              color="info"
-              subtitle="Registered customers"
-            />
-
-            <StatCard
-              title="Products"
-              value={formatNumber(
-                getValue(
-                  overviewData,
-                  "total_products",
-                  "products_count"
-                )
-              )}
-              icon="bi-box-seam"
-              color="warning"
-              subtitle="Products in the catalogue"
-            />
-          </div>
-
-          <div className="row g-3 mb-4">
-            <div className="col-12 col-lg-6">
-              <div className="card border-0 shadow-sm h-100">
-                <div className="card-header bg-white py-3">
-                  <h5 className="fw-bold mb-0">
-                    <i className="bi bi-bar-chart-line text-success me-2"></i>
-                    Sales Summary
-                  </h5>
-                </div>
-
-                <div className="card-body">
-                  <div className="d-flex justify-content-between border-bottom py-3">
-                    <span className="text-muted">Total sales</span>
-                    <strong>
-                      {formatMoney(
-                        getValue(
-                          salesData,
-                          "total_sales",
-                          "total_revenue",
-                          "sales_total"
-                        )
-                      )}
-                    </strong>
-                  </div>
-
-                  <div className="d-flex justify-content-between border-bottom py-3">
-                    <span className="text-muted">Completed order value</span>
-                    <strong>
-                      {formatMoney(
-                        getValue(
-                          overviewData,
-                          "completed_sales",
-                          "completed_order_value",
-                          "completed_revenue"
-                        )
-                      )}
-                    </strong>
-                  </div>
-
-                  <div className="d-flex justify-content-between py-3">
-                    <span className="text-muted">Average order value</span>
-                    <strong>
-                      {formatMoney(
-                        getValue(
-                          overviewData,
-                          "average_order_value",
-                          "average_order"
-                        )
-                      )}
-                    </strong>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <div className="col-12 col-lg-6">
-              <div className="card border-0 shadow-sm h-100">
-                <div className="card-header bg-white py-3">
-                  <h5 className="fw-bold mb-0">
-                    <i className="bi bi-truck text-success me-2"></i>
-                    Delivery Summary
-                  </h5>
-                </div>
-
-                <div className="card-body">
-                  <div className="d-flex justify-content-between border-bottom py-3">
-                    <span className="text-muted">Total deliveries</span>
-                    <strong>
-                      {formatNumber(
-                        getValue(
-                          deliveriesData,
-                          "total_deliveries",
-                          "total",
-                          "count"
-                        )
-                      )}
-                    </strong>
-                  </div>
-
-                  <div className="d-flex justify-content-between border-bottom py-3">
-                    <span className="text-muted">Completed deliveries</span>
-                    <strong className="text-success">
-                      {formatNumber(
-                        getValue(
-                          deliveriesData,
-                          "completed_deliveries",
-                          "completed"
-                        )
-                      )}
-                    </strong>
-                  </div>
-
-                  <div className="d-flex justify-content-between py-3">
-                    <span className="text-muted">Pending deliveries</span>
-                    <strong className="text-warning">
-                      {formatNumber(
-                        getValue(
-                          deliveriesData,
-                          "pending_deliveries",
-                          "pending"
-                        )
-                      )}
-                    </strong>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-        </>
-      )}
-
-      {/* SALES REPORT */}
-
-      {activeReport === "sales" && (
-        <div className="card border-0 shadow-sm mb-4">
-          <div className="card-header bg-white py-3">
-            <h5 className="fw-bold mb-0">Sales Report</h5>
-          </div>
-
-          <div className="card-body">
-            <div className="row g-3 mb-4">
-              <div className="col-12 col-md-6">
-                <div className="rounded-3 bg-success-subtle p-4">
-                  <p className="text-muted mb-1">Total Sales</p>
-                  <h3 className="fw-bold text-success mb-0">
-                    {formatMoney(
-                      getValue(
-                        salesData,
-                        "total_sales",
-                        "total_revenue",
-                        "sales_total"
-                      )
-                    )}
-                  </h3>
-                </div>
-              </div>
-
-              <div className="col-12 col-md-6">
-                <div className="rounded-3 bg-primary-subtle p-4">
-                  <p className="text-muted mb-1">Total Orders</p>
-                  <h3 className="fw-bold text-primary mb-0">
-                    {formatNumber(
-                      getValue(
-                        salesData,
-                        "total_orders",
-                        "orders_count"
-                      )
-                    )}
-                  </h3>
-                </div>
-              </div>
-            </div>
-
-            <h6 className="fw-bold mb-3">Sales Breakdown</h6>
-
-            {salesList.length > 0 ? (
-              <div className="table-responsive">
-                <table className="table table-hover align-middle">
-                  <thead className="table-light">
-                    <tr>
-                      <th>Date</th>
-                      <th>Orders</th>
-                      <th className="text-end">Sales (KES)</th>
-                    </tr>
-                  </thead>
-
-                  <tbody>
-                    {salesList.map((item, index) => (
-                      <tr key={item.id ?? item.date ?? index}>
-                        <td>
-                          {formatDate(
-                            item.date ??
-                              item.day ??
-                              item.created_at
-                          )}
-                        </td>
-
-                        <td>
-                          {formatNumber(
-                            getValue(
-                              item,
-                              "total_orders",
-                              "orders_count",
-                              "orders",
-                              "count"
-                            )
-                          )}
-                        </td>
-
-                        <td className="text-end fw-semibold">
-                          {formatMoney(
-                            getValue(
-                              item,
-                              "total_sales",
-                              "total_revenue",
-                              "sales",
-                              "revenue",
-                              "total"
-                            )
-                          )}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            ) : (
-              <div className="text-center text-muted py-5">
-                <i className="bi bi-bar-chart fs-1 d-block mb-3"></i>
-                No sales breakdown is available for this period.
-              </div>
-            )}
-          </div>
-        </div>
-      )}
-
-      {/* PRODUCT REPORT */}
-
-      {activeReport === "products" && (
-        <>
-          <div className="row g-3 mb-4">
-            <StatCard
-              title="Products Listed"
-              value={formatNumber(
-                getValue(
-                  productsData,
-                  "total_products",
-                  "products_count"
-                )
-              )}
-              icon="bi-box-seam"
-              color="primary"
-            />
-
-            <StatCard
-              title="Units Sold"
-              value={formatNumber(
-                getValue(
-                  productsData,
-                  "total_quantity_sold",
-                  "units_sold",
-                  "total_units"
-                )
-              )}
-              icon="bi-cart-check"
-              color="success"
-            />
-
-            <StatCard
-              title="Stock Remaining"
-              value={formatNumber(
-                getValue(
-                  productsData,
-                  "total_stock",
-                  "stock_remaining"
-                )
-              )}
-              icon="bi-boxes"
-              color="info"
-            />
-
-            <StatCard
-              title="Product Value Sold"
-              value={formatMoney(
-                getValue(
-                  productsData,
-                  "total_sales",
-                  "total_value",
-                  "total_revenue"
-                )
-              )}
-              icon="bi-cash-stack"
-              color="warning"
-            />
-          </div>
-
-          <div className="card border-0 shadow-sm mb-4">
-            <div className="card-header bg-white py-3">
-              <h5 className="fw-bold mb-0">
-                <i className="bi bi-trophy text-warning me-2"></i>
-                Best-Selling Products
-              </h5>
-            </div>
-
-            <div className="card-body">
-              {productList.length > 0 ? (
-                <div className="table-responsive">
-                  <table className="table table-hover align-middle">
-                    <thead className="table-light">
-                      <tr>
-                        <th>#</th>
-                        <th>Product</th>
-                        <th>Units Sold</th>
-                        <th className="text-end">Sales Value</th>
-                      </tr>
-                    </thead>
-
-                    <tbody>
-                      {productList.map((product, index) => (
-                        <tr
-                          key={
-                            product.product_id ??
-                            product.id ??
-                            index
-                          }
-                        >
-                          <td>{index + 1}</td>
-
-                          <td className="fw-semibold">
-                            {product.product_name ??
-                              product.name ??
-                              "Unknown product"}
-                          </td>
-
-                          <td>
-                            {formatNumber(
-                              getValue(
-                                product,
-                                "quantity_sold",
-                                "total_quantity",
-                                "units_sold",
-                                "quantity"
-                              )
-                            )}
-                          </td>
-
-                          <td className="text-end">
-                            {formatMoney(
-                              getValue(
-                                product,
-                                "total_sales",
-                                "total_value",
-                                "revenue",
-                                "subtotal"
-                              )
-                            )}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              ) : (
-                <div className="text-center text-muted py-5">
-                  <i className="bi bi-box fs-1 d-block mb-3"></i>
-                  No product sales are available for this period.
-                </div>
-              )}
-            </div>
-          </div>
-        </>
-      )}
-
-      {/* DELIVERY REPORT */}
-
-      {activeReport === "deliveries" && (
-        <>
-          <div className="row g-3 mb-4">
-            <StatCard
-              title="Total Deliveries"
-              value={formatNumber(
-                getValue(
-                  deliveriesData,
-                  "total_deliveries",
-                  "total",
-                  "count"
-                )
-              )}
-              icon="bi-truck"
-              color="primary"
-            />
-
-            <StatCard
-              title="Completed"
-              value={formatNumber(
-                getValue(
-                  deliveriesData,
-                  "completed_deliveries",
-                  "completed"
-                )
-              )}
-              icon="bi-check-circle"
-              color="success"
-            />
-
-            <StatCard
-              title="Pending"
-              value={formatNumber(
-                getValue(
-                  deliveriesData,
-                  "pending_deliveries",
-                  "pending"
-                )
-              )}
-              icon="bi-clock-history"
-              color="warning"
-            />
-
-            <StatCard
-              title="Cancelled"
-              value={formatNumber(
-                getValue(
-                  deliveriesData,
-                  "cancelled_deliveries",
-                  "cancelled"
-                )
-              )}
-              icon="bi-x-circle"
-              color="danger"
-            />
-          </div>
-
-          <div className="card border-0 shadow-sm mb-4">
-            <div className="card-header bg-white py-3">
-              <h5 className="fw-bold mb-0">
-                <i className="bi bi-truck text-success me-2"></i>
-                Delivery Status Breakdown
-              </h5>
-            </div>
-
-            <div className="card-body">
-              {deliveryList.length > 0 ? (
-                <div className="table-responsive">
-                  <table className="table table-hover align-middle">
-                    <thead className="table-light">
-                      <tr>
-                        <th>Delivery Status</th>
-                        <th className="text-end">Number of Deliveries</th>
-                      </tr>
-                    </thead>
-
-                    <tbody>
-                      {deliveryList.map((delivery, index) => (
-                        <tr
-                          key={
-                            delivery.status ??
-                            delivery.delivery_status ??
-                            index
-                          }
-                        >
-                          <td className="text-capitalize">
-                            {(
-                              delivery.status ??
-                              delivery.delivery_status ??
-                              "Unknown"
-                            ).replaceAll("_", " ")}
-                          </td>
-
-                          <td className="text-end fw-semibold">
-                            {formatNumber(
-                              getValue(
-                                delivery,
-                                "count",
-                                "total",
-                                "total_deliveries",
-                                "quantity"
-                              )
-                            )}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              ) : (
-                <div className="text-center text-muted py-5">
-                  <i className="bi bi-truck fs-1 d-block mb-3"></i>
-                  No delivery breakdown is available for this period.
-                </div>
-              )}
-            </div>
-          </div>
-        </>
-      )}
-
-      {/* FOOTER NOTE */}
-
-      <div className="alert alert-light border mt-4 mb-0">
-        <i className="bi bi-info-circle text-success me-2"></i>
-        <strong>Reporting note:</strong> Sales figures represent order values
-        recorded by the system. They should not be treated as confirmed
-        payments until payment verification is implemented.
       </div>
     </div>
-  );
+  </div>
+</div>
+
+
+);
+
+const EmptyState = ({ icon, message }) => ( <div className="text-center text-muted py-5">
+<i className={`bi ${icon} fs-1 d-block mb-3`}></i>
+{message} </div>
+);
+
+const ReportTabs = [
+{ id: "overview", label: "Website Overview", icon: "bi-speedometer2" },
+{ id: "sales", label: "Website Sales", icon: "bi-currency-exchange" },
+{ id: "products", label: "Website Products", icon: "bi-box-seam" },
+{ id: "deliveries", label: "Deliveries", icon: "bi-truck" },
+{ id: "profit", label: "Website Profit", icon: "bi-graph-up-arrow" },
+{ id: "pos", label: "POS Reports", icon: "bi-shop" },
+{ id: "branches", label: "Branch Reports", icon: "bi-diagram-3" },
+];
+
+// =========================================================
+// LOADING STATE
+// =========================================================
+
+if (loading && !overview && !sales && !products && !deliveries) {
+return ( <div className="container-fluid p-4"> <div className="d-flex flex-column align-items-center justify-content-center py-5"> <div className="spinner-border text-success mb-3" role="status"> <span className="visually-hidden">Loading...</span> </div> <h5>Loading Reports & Analytics...</h5> <p className="text-muted">Please wait while we prepare your reports.</p> </div> </div>
+);
+}
+
+// =========================================================
+// MAIN DASHBOARD
+// =========================================================
+
+return ( <div className="container-fluid p-3 p-md-4 bg-light min-vh-100"> <div className="d-flex flex-column flex-lg-row justify-content-between align-items-lg-center gap-3 mb-4"> <div> <h2 className="fw-bold mb-1"> <i className="bi bi-graph-up-arrow text-success me-2"></i>
+Reports & Analytics </h2> <p className="text-muted mb-0">
+View website performance, cashier sales, and branch performance separately. </p> </div>
+
+
+    <button
+      type="button"
+      className="btn btn-success"
+      onClick={loadReports}
+      disabled={loading}
+    >
+      <i
+        className={`bi ${
+          loading ? "bi-arrow-repeat" : "bi-arrow-clockwise"
+        } me-2`}
+      ></i>
+      {loading ? "Refreshing..." : "Refresh Reports"}
+    </button>
+  </div>
+
+  {/* DATE FILTERS */}
+
+  <div className="card border-0 shadow-sm mb-4">
+    <div className="card-body">
+      <div className="row g-3 align-items-end">
+        <div className="col-12 col-md-4">
+          <label htmlFor="startDate" className="form-label fw-semibold">
+            Start date
+          </label>
+          <input
+            id="startDate"
+            type="date"
+            className="form-control"
+            value={startDate}
+            max={endDate || undefined}
+            onChange={(event) => setStartDate(event.target.value)}
+          />
+        </div>
+
+        <div className="col-12 col-md-4">
+          <label htmlFor="endDate" className="form-label fw-semibold">
+            End date
+          </label>
+          <input
+            id="endDate"
+            type="date"
+            className="form-control"
+            value={endDate}
+            min={startDate || undefined}
+            onChange={(event) => setEndDate(event.target.value)}
+          />
+        </div>
+
+        <div className="col-12 col-md-4 d-flex gap-2">
+          <button
+            type="button"
+            className="btn btn-success flex-grow-1"
+            onClick={loadReports}
+            disabled={loading}
+          >
+            <i className="bi bi-funnel me-1"></i>
+            Apply Filters
+          </button>
+
+          <button
+            type="button"
+            className="btn btn-outline-secondary"
+            onClick={() => {
+              setStartDate("");
+              setEndDate("");
+            }}
+            title="Clear date filters"
+            aria-label="Clear date filters"
+          >
+            <i className="bi bi-x-lg"></i>
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  {error && (
+    <div className="alert alert-danger" role="alert">
+      <strong>Website reports:</strong> {error}
+      <button
+        type="button"
+        className="btn btn-sm btn-outline-danger ms-3"
+        onClick={loadReports}
+      >
+        Retry
+      </button>
+    </div>
+  )}
+
+  {/* NAVIGATION */}
+
+  <div className="d-flex gap-2 flex-wrap mb-4">
+    {ReportTabs.map((tab) => (
+      <button
+        key={tab.id}
+        type="button"
+        className={`btn ${
+          activeReport === tab.id ? "btn-success" : "btn-outline-success"
+        }`}
+        onClick={() => setActiveReport(tab.id)}
+      >
+        <i className={`bi ${tab.icon} me-2`}></i>
+        {tab.label}
+      </button>
+    ))}
+  </div>
+
+  {loading && (
+    <div className="alert alert-info py-2">
+      <span className="spinner-border spinner-border-sm me-2" role="status"></span>
+      Updating report data...
+    </div>
+  )}
+
+  {/* WEBSITE OVERVIEW */}
+
+  {activeReport === "overview" && (
+    <>
+      <div className="row g-3 mb-4">
+        <StatCard
+          title="Website Orders"
+          value={formatNumber(
+            getValue(overviewData, "total_orders", "orders_count")
+          )}
+          icon="bi-receipt"
+          color="primary"
+          subtitle="Website orders only"
+        />
+
+        <StatCard
+          title="Website Sales"
+          value={formatMoney(
+            getValue(overviewData, "total_sales", "total_revenue", "sales_total")
+          )}
+          icon="bi-currency-exchange"
+          color="success"
+          subtitle="Website order value"
+        />
+
+        <StatCard
+          title="Customers"
+          value={formatNumber(
+            getValue(overviewData, "total_customers", "customers_count")
+          )}
+          icon="bi-people"
+          color="info"
+          subtitle="Registered customers"
+        />
+
+        <StatCard
+          title="Products"
+          value={formatNumber(
+            getValue(overviewData, "total_products", "products_count")
+          )}
+          icon="bi-box-seam"
+          color="warning"
+          subtitle="Product catalogue"
+        />
+      </div>
+
+      <div className="row g-3 mb-4">
+        <div className="col-12 col-lg-6">
+          <div className="card border-0 shadow-sm h-100">
+            <div className="card-header bg-white py-3">
+              <h5 className="fw-bold mb-0">Website Sales Summary</h5>
+            </div>
+            <div className="card-body">
+              <div className="d-flex justify-content-between border-bottom py-3">
+                <span className="text-muted">Total sales</span>
+                <strong>
+                  {formatMoney(
+                    getValue(salesData, "total_sales", "total_revenue", "sales_total")
+                  )}
+                </strong>
+              </div>
+              <div className="d-flex justify-content-between border-bottom py-3">
+                <span className="text-muted">Completed order value</span>
+                <strong>
+                  {formatMoney(
+                    getValue(
+                      overviewData,
+                      "completed_sales",
+                      "completed_order_value",
+                      "completed_revenue"
+                    )
+                  )}
+                </strong>
+              </div>
+              <div className="d-flex justify-content-between py-3">
+                <span className="text-muted">Average order value</span>
+                <strong>
+                  {formatMoney(
+                    getValue(overviewData, "average_order_value", "average_order")
+                  )}
+                </strong>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div className="col-12 col-lg-6">
+          <div className="card border-0 shadow-sm h-100">
+            <div className="card-header bg-white py-3">
+              <h5 className="fw-bold mb-0">Delivery Summary</h5>
+            </div>
+            <div className="card-body">
+              <div className="d-flex justify-content-between border-bottom py-3">
+                <span className="text-muted">Total deliveries</span>
+                <strong>
+                  {formatNumber(
+                    getValue(deliveriesData, "total_deliveries", "total", "count")
+                  )}
+                </strong>
+              </div>
+              <div className="d-flex justify-content-between border-bottom py-3">
+                <span className="text-muted">Completed deliveries</span>
+                <strong className="text-success">
+                  {formatNumber(
+                    getValue(deliveriesData, "completed_deliveries", "completed")
+                  )}
+                </strong>
+              </div>
+              <div className="d-flex justify-content-between py-3">
+                <span className="text-muted">Pending deliveries</span>
+                <strong className="text-warning">
+                  {formatNumber(
+                    getValue(deliveriesData, "pending_deliveries", "pending")
+                  )}
+                </strong>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </>
+  )}
+
+  {/* WEBSITE SALES */}
+
+  {activeReport === "sales" && (
+    <div className="card border-0 shadow-sm mb-4">
+      <div className="card-header bg-white py-3">
+        <h5 className="fw-bold mb-0">Website Sales Report</h5>
+        <small className="text-muted">POS sales are excluded from these figures.</small>
+      </div>
+      <div className="card-body">
+        <div className="row g-3 mb-4">
+          <StatCard
+            title="Total Website Sales"
+            value={formatMoney(
+              getValue(salesData, "total_sales", "total_revenue", "sales_total")
+            )}
+            icon="bi-currency-exchange"
+            color="success"
+          />
+          <StatCard
+            title="Website Orders"
+            value={formatNumber(
+              getValue(salesData, "total_orders", "orders_count")
+            )}
+            icon="bi-receipt"
+            color="primary"
+          />
+        </div>
+
+        <h6 className="fw-bold mb-3">Sales Breakdown</h6>
+        {salesList.length ? (
+          <div className="table-responsive">
+            <table className="table table-hover align-middle">
+              <thead className="table-light">
+                <tr>
+                  <th>Date</th>
+                  <th>Orders</th>
+                  <th className="text-end">Sales (KES)</th>
+                </tr>
+              </thead>
+              <tbody>
+                {salesList.map((item, index) => (
+                  <tr key={item.id ?? item.date ?? index}>
+                    <td>
+                      {formatDate(item.date ?? item.day ?? item.created_at)}
+                    </td>
+                    <td>
+                      {formatNumber(
+                        getValue(item, "total_orders", "orders_count", "orders", "count")
+                      )}
+                    </td>
+                    <td className="text-end fw-semibold">
+                      {formatMoney(
+                        getValue(item, "total_sales", "total_revenue", "sales", "revenue", "total")
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <EmptyState icon="bi-bar-chart" message="No website sales breakdown is available for this period." />
+        )}
+      </div>
+    </div>
+  )}
+
+  {/* WEBSITE PRODUCTS */}
+
+  {activeReport === "products" && (
+    <>
+      <div className="row g-3 mb-4">
+        <StatCard
+          title="Products Listed"
+          value={formatNumber(
+            getValue(productsData, "total_products", "products_count")
+          )}
+          icon="bi-box-seam"
+          color="primary"
+        />
+        <StatCard
+          title="Units Sold"
+          value={formatNumber(
+            getValue(productsData, "total_quantity_sold", "units_sold", "total_units")
+          )}
+          icon="bi-cart-check"
+          color="success"
+        />
+        <StatCard
+          title="Stock Remaining"
+          value={formatNumber(
+            getValue(productsData, "total_stock", "stock_remaining")
+          )}
+          icon="bi-boxes"
+          color="info"
+        />
+        <StatCard
+          title="Product Value Sold"
+          value={formatMoney(
+            getValue(productsData, "total_sales", "total_value", "total_revenue")
+          )}
+          icon="bi-cash-stack"
+          color="warning"
+        />
+      </div>
+
+      <div className="card border-0 shadow-sm mb-4">
+        <div className="card-header bg-white py-3">
+          <h5 className="fw-bold mb-0">Website Best-Selling Products</h5>
+        </div>
+        <div className="card-body">
+          {productList.length ? (
+            <div className="table-responsive">
+              <table className="table table-hover align-middle">
+                <thead className="table-light">
+                  <tr>
+                    <th>#</th>
+                    <th>Product</th>
+                    <th>Units Sold</th>
+                    <th className="text-end">Sales Value</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {productList.map((product, index) => (
+                    <tr key={product.product_id ?? product.id ?? index}>
+                      <td>{index + 1}</td>
+                      <td className="fw-semibold">
+                        {product.product_name ?? product.name ?? "Unknown product"}
+                      </td>
+                      <td>
+                        {formatNumber(
+                          getValue(product, "quantity_sold", "total_quantity", "units_sold", "quantity")
+                        )}
+                      </td>
+                      <td className="text-end">
+                        {formatMoney(
+                          getValue(product, "total_sales", "total_value", "revenue", "subtotal")
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <EmptyState icon="bi-box" message="No website product sales are available for this period." />
+          )}
+        </div>
+      </div>
+    </>
+  )}
+
+  {/* DELIVERIES */}
+
+  {activeReport === "deliveries" && (
+    <>
+      <div className="row g-3 mb-4">
+        <StatCard
+          title="Total Deliveries"
+          value={formatNumber(
+            getValue(deliveriesData, "total_deliveries", "total", "count")
+          )}
+          icon="bi-truck"
+          color="primary"
+        />
+        <StatCard
+          title="Completed"
+          value={formatNumber(
+            getValue(deliveriesData, "completed_deliveries", "completed")
+          )}
+          icon="bi-check-circle"
+          color="success"
+        />
+        <StatCard
+          title="Pending"
+          value={formatNumber(
+            getValue(deliveriesData, "pending_deliveries", "pending")
+          )}
+          icon="bi-clock-history"
+          color="warning"
+        />
+        <StatCard
+          title="Cancelled"
+          value={formatNumber(
+            getValue(deliveriesData, "cancelled_deliveries", "cancelled")
+          )}
+          icon="bi-x-circle"
+          color="danger"
+        />
+      </div>
+
+      <div className="card border-0 shadow-sm">
+        <div className="card-header bg-white py-3">
+          <h5 className="fw-bold mb-0">Delivery Status Breakdown</h5>
+        </div>
+        <div className="card-body">
+          {deliveryList.length ? (
+            <div className="table-responsive">
+              <table className="table table-hover align-middle">
+                <thead className="table-light">
+                  <tr>
+                    <th>Delivery Status</th>
+                    <th className="text-end">Number of Deliveries</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {deliveryList.map((delivery, index) => (
+                    <tr key={delivery.status ?? delivery.delivery_status ?? index}>
+                      <td className="text-capitalize">
+                        {String(
+                          delivery.status ?? delivery.delivery_status ?? "Unknown"
+                        ).replaceAll("_", " ")}
+                      </td>
+                      <td className="text-end fw-semibold">
+                        {formatNumber(
+                          getValue(delivery, "count", "total", "total_deliveries", "quantity")
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <EmptyState icon="bi-truck" message="No delivery breakdown is available for this period." />
+          )}
+        </div>
+      </div>
+    </>
+  )}
+
+  {/* WEBSITE PROFIT */}
+
+  {activeReport === "profit" && (
+    <>
+      <div className="row g-3 mb-4">
+        <StatCard
+          title="Website Revenue"
+          value={formatMoney(
+            getValue(profitData, "total_revenue", "total_sales", "revenue")
+          )}
+          icon="bi-cash-stack"
+          color="success"
+          subtitle="Website orders only"
+        />
+        <StatCard
+          title="Cost of Goods"
+          value={formatMoney(
+            getValue(profitData, "total_cost", "total_buying_cost", "cost_of_goods")
+          )}
+          icon="bi-box-seam"
+          color="primary"
+        />
+        <StatCard
+          title="Gross Profit"
+          value={formatMoney(
+            getValue(profitData, "gross_profit", "total_profit", "profit")
+          )}
+          icon="bi-graph-up-arrow"
+          color="info"
+        />
+        <StatCard
+          title="Profit Margin"
+          value={`${formatNumber(
+            getValue(profitData, "profit_margin", "margin_percentage")
+          )}%`}
+          icon="bi-percent"
+          color="warning"
+        />
+      </div>
+
+      <div className="alert alert-light border">
+        <i className="bi bi-info-circle text-success me-2"></i>
+        These figures depend on the buying-price and profit calculations returned by the website profit endpoint.
+      </div>
+    </>
+  )}
+
+  {/* POS REPORTS */}
+
+  {activeReport === "pos" && (
+    <>
+      {posError && (
+        <div className="alert alert-warning">
+          <i className="bi bi-exclamation-triangle me-2"></i>
+          {posError}
+        </div>
+      )}
+
+      <div className="alert alert-info">
+        <i className="bi bi-shop me-2"></i>
+        POS reports use cashier sales records. They are kept separate from website orders.
+      </div>
+
+      <div className="row g-3 mb-4">
+        <StatCard
+          title="POS Sales"
+          value={formatMoney(
+            getValue(posOverviewData, "total_sales", "total_revenue", "sales_total")
+          )}
+          icon="bi-currency-exchange"
+          color="success"
+        />
+        <StatCard
+          title="POS Transactions"
+          value={formatNumber(
+            getValue(posOverviewData, "total_sales_count", "total_transactions", "total_orders", "sales_count")
+          )}
+          icon="bi-receipt"
+          color="primary"
+        />
+        <StatCard
+          title="Paid POS Sales"
+          value={formatMoney(
+            getValue(posOverviewData, "paid_sales", "total_paid", "paid_revenue")
+          )}
+          icon="bi-check-circle"
+          color="info"
+        />
+        <StatCard
+          title="Pending POS Payments"
+          value={formatMoney(
+            getValue(posOverviewData, "pending_payments", "unpaid_sales", "pending_amount")
+          )}
+          icon="bi-clock-history"
+          color="warning"
+        />
+      </div>
+
+      <div className="card border-0 shadow-sm mb-4">
+        <div className="card-header bg-white py-3">
+          <h5 className="fw-bold mb-0">POS Sales Breakdown</h5>
+        </div>
+        <div className="card-body">
+          {posSalesList.length ? (
+            <div className="table-responsive">
+              <table className="table table-hover align-middle">
+                <thead className="table-light">
+                  <tr>
+                    <th>Date</th>
+                    <th>Transactions</th>
+                    <th className="text-end">Sales (KES)</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {posSalesList.map((item, index) => (
+                    <tr key={item.id ?? item.date ?? index}>
+                      <td>{formatDate(item.date ?? item.day ?? item.created_at)}</td>
+                      <td>
+                        {formatNumber(
+                          getValue(item, "total_sales_count", "total_transactions", "sales_count", "count")
+                        )}
+                      </td>
+                      <td className="text-end fw-semibold">
+                        {formatMoney(
+                          getValue(item, "total_sales", "total_revenue", "sales", "revenue", "total")
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <EmptyState icon="bi-receipt" message="No POS sales breakdown is available." />
+          )}
+        </div>
+      </div>
+
+      <div className="card border-0 shadow-sm">
+        <div className="card-header bg-white py-3">
+          <h5 className="fw-bold mb-0">Best-Selling POS Products</h5>
+        </div>
+        <div className="card-body">
+          {posProductList.length ? (
+            <div className="table-responsive">
+              <table className="table table-hover align-middle">
+                <thead className="table-light">
+                  <tr>
+                    <th>#</th>
+                    <th>Product</th>
+                    <th>Units Sold</th>
+                    <th className="text-end">Sales Value</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {posProductList.map((product, index) => (
+                    <tr key={product.product_id ?? product.id ?? index}>
+                      <td>{index + 1}</td>
+                      <td>{product.product_name ?? product.name ?? "Unknown product"}</td>
+                      <td>
+                        {formatNumber(
+                          getValue(product, "quantity_sold", "total_quantity", "units_sold", "quantity")
+                        )}
+                      </td>
+                      <td className="text-end">
+                        {formatMoney(
+                          getValue(product, "total_sales", "total_value", "revenue", "subtotal")
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <EmptyState icon="bi-box-seam" message="No POS product sales are available." />
+          )}
+        </div>
+      </div>
+    </>
+  )}
+
+  {/* BRANCH REPORTS */}
+
+  {activeReport === "branches" && (
+    <>
+      {posError && (
+        <div className="alert alert-warning">
+          <i className="bi bi-exclamation-triangle me-2"></i>
+          {posError}
+        </div>
+      )}
+
+      <div className="alert alert-info">
+        <i className="bi bi-diagram-3 me-2"></i>
+        Each branch is reported separately using its own POS sales records. Website orders are excluded.
+      </div>
+
+      <div className="card border-0 shadow-sm">
+        <div className="card-header bg-white py-3">
+          <h5 className="fw-bold mb-0">Branch Performance</h5>
+        </div>
+        <div className="card-body">
+          {branchReports.length ? (
+            <div className="table-responsive">
+              <table className="table table-hover align-middle">
+                <thead className="table-light">
+                  <tr>
+                    <th>Branch</th>
+                    <th>Transactions</th>
+                    <th className="text-end">Sales (KES)</th>
+                    <th className="text-end">Paid Sales (KES)</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {branchReports.map((branch, index) => (
+                    <tr key={branch.branch_id ?? branch.id ?? index}>
+                      <td className="fw-semibold">
+                        {branch.branch_name ?? branch.name ?? `Branch ${index + 1}`}
+                      </td>
+                      <td>
+                        {formatNumber(
+                          getValue(branch, "total_transactions", "total_sales_count", "sales_count", "total_orders")
+                        )}
+                      </td>
+                      <td className="text-end">
+                        {formatMoney(
+                          getValue(branch, "total_sales", "total_revenue", "sales_total")
+                        )}
+                      </td>
+                      <td className="text-end text-success">
+                        {formatMoney(
+                          getValue(branch, "paid_sales", "total_paid", "paid_revenue")
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <EmptyState icon="bi-diagram-3" message="No branch report data is available yet." />
+          )}
+        </div>
+      </div>
+    </>
+  )}
+
+  {/* FOOTER */}
+
+  <div className="alert alert-light border mt-4 mb-0">
+    <i className="bi bi-info-circle text-success me-2"></i>
+    <strong>Reporting note:</strong> Website reports use website orders.
+    POS and branch reports use separate cashier sales records. Sales totals
+    should not automatically be treated as confirmed payments; payment
+    figures must reflect the backend's recorded payment statuses.
+  </div>
+</div>
+
+
+);
 }
 
 export default Reports;
