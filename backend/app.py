@@ -84,9 +84,6 @@ mail = Mail(app)
 # CORS CONFIGURATION
 # --------------------------------------------------
 
-# Include your production frontend origins here.
-# Replace the example domains with your actual deployed URLs.
-
 allowed_origins = [
     "http://localhost:5173",
     "https://agrovet-shop.vercel.app",
@@ -95,7 +92,7 @@ allowed_origins = [
 CORS(
     app,
     resources={
-        r"/api/*": {
+        r"/*": {
             "origins": allowed_origins,
             "methods": [
                 "GET",
@@ -109,10 +106,10 @@ CORS(
                 "Content-Type",
                 "Authorization",
             ],
+            "supports_credentials": False,
         }
     },
 )
-
 
 # --------------------------------------------------
 # INITIALIZE DATABASE AND MIGRATIONS
