@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 
-const API_BASE = "http://127.0.0.1:5000/api";
+const API_BASE = "https://agrovet-api-a00w.onrender.com";
 
 const ORDER_STATUSES = [
   { value: "pending", label: "Pending" },
