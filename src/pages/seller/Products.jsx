@@ -3,7 +3,9 @@ import api from "../../api/api";
 
 function Products() {
   const [products, setProducts] = useState([]);
+  const [branches, setBranches] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [loadingBranches, setLoadingBranches] = useState(false);
   const [saving, setSaving] = useState(false);
 
   const [showForm, setShowForm] = useState(false);
@@ -23,10 +25,11 @@ function Products() {
     price: "",
     unit: "",
     stock: "",
+    branch_id: "",
+    initial_branch_stock: "",
     image: "",
   });
 
-  // Safely normalize values that may be strings, numbers, null or undefined.
   const toInputValue = (value) => {
     if (value === null || value === undefined) {
       return "";
@@ -66,6 +69,7 @@ function Products() {
       setProducts(fetchedProducts);
     } catch (error) {
       console.error("Failed to fetch products:", error);
+
       alert(
         error.response?.data?.message ||
           "Failed to load products. Please try again."
@@ -75,11 +79,63 @@ function Products() {
     }
   };
 
+  const fetchBranches = async () => {
+    try {
+      setLoadingBranches(true);
+
+      const response = await api.get("/admin/branches");
+      const data = response.data;
+
+      const fetchedBranches = Array.isArray(data)
+        ? data
+        : Array.isArray(data?.branches)
+        ? data.branches
+        : Array.isArray(data?.data)
+        ? data.data
+        : [];
+
+      const activeBranches = fetchedBranches.filter(
+        (branch) =>
+          branch.is_active === true ||
+          branch.is_active === 1 ||
+          branch.is_active === "true"
+      );
+
+      setBranches(activeBranches);
+
+      setFormData((previous) => {
+        const selectedBranchExists = activeBranches.some(
+          (branch) =>
+            String(branch.id) === String(previous.branch_id)
+        );
+
+        return {
+          ...previous,
+          branch_id: selectedBranchExists
+            ? previous.branch_id
+            : activeBranches.length === 1
+            ? String(activeBranches[0].id)
+            : "",
+        };
+      });
+    } catch (error) {
+      console.error("Failed to fetch branches:", error);
+
+      setBranches([]);
+
+      alert(
+        error.response?.data?.message ||
+          "Failed to load branches. Check your admin access and try again."
+      );
+    } finally {
+      setLoadingBranches(false);
+    }
+  };
+
   useEffect(() => {
     fetchProducts();
   }, []);
 
-  // Release temporary image-preview URLs when they are replaced or removed.
   useEffect(() => {
     return () => {
       if (imagePreview.startsWith("blob:")) {
@@ -149,6 +205,9 @@ function Products() {
       price: "",
       unit: "",
       stock: "",
+      branch_id:
+        branches.length === 1 ? String(branches[0].id) : "",
+      initial_branch_stock: "",
       image: "",
     });
 
@@ -163,9 +222,11 @@ function Products() {
     }
   };
 
-  const openAddForm = () => {
+  const openAddForm = async () => {
     resetForm();
     setShowForm(true);
+
+    await fetchBranches();
   };
 
   const handleSubmit = async (event) => {
@@ -174,6 +235,11 @@ function Products() {
     if (saving) {
       return;
     }
+
+    const name = toInputValue(formData.name).trim();
+    const category = toInputValue(formData.category).trim();
+    const description = toInputValue(formData.description);
+    const unit = toInputValue(formData.unit).trim();
 
     const priceText = toInputValue(formData.price).trim();
     const buyingPriceText = toInputValue(
@@ -188,7 +254,16 @@ function Products() {
 
     const stock = Number(stockText);
 
-    // Validate the selling price.
+    if (!name || !category) {
+      alert("Please enter the product name and category.");
+      return;
+    }
+
+    if (!unit) {
+      alert("Please enter the product unit.");
+      return;
+    }
+
     if (
       priceText === "" ||
       !Number.isFinite(sellingPrice) ||
@@ -198,7 +273,6 @@ function Products() {
       return;
     }
 
-    // Validate the buying price if supplied.
     if (
       buyingPrice !== null &&
       (!Number.isFinite(buyingPrice) || buyingPrice < 0)
@@ -207,38 +281,63 @@ function Products() {
       return;
     }
 
-    // Validate stock.
-    if (
-      stockText === "" ||
-      !Number.isFinite(stock) ||
-      stock < 0
-    ) {
-      alert("Please enter a valid, non-negative stock quantity.");
-      return;
-    }
-
-    // A new product must have a buying price.
     if (!editingProduct && buyingPrice === null) {
       alert("Please enter the buying price for this product.");
       return;
     }
 
     if (
-      !toInputValue(formData.name).trim() ||
-      !toInputValue(formData.category).trim()
+      stockText === "" ||
+      !Number.isFinite(stock) ||
+      stock < 0 ||
+      !Number.isInteger(stock)
     ) {
-      alert("Please enter the product name and category.");
+      alert("General stock must be a non-negative whole number.");
       return;
     }
 
-    if (!toInputValue(formData.unit).trim()) {
-      alert("Please enter the product unit.");
-      return;
-    }
+    let branchId = null;
+    let initialBranchStock = null;
 
-    if (!Number.isInteger(stock)) {
-      alert("Stock must be a whole number.");
-      return;
+    if (!editingProduct) {
+      const branchIdText = toInputValue(formData.branch_id).trim();
+      const branchStockText = toInputValue(
+        formData.initial_branch_stock
+      ).trim();
+
+      branchId = Number(branchIdText);
+      initialBranchStock = Number(branchStockText);
+
+      if (
+        branchIdText === "" ||
+        !Number.isInteger(branchId) ||
+        branchId <= 0
+      ) {
+        alert("Please select a branch for this product.");
+        return;
+      }
+
+      if (
+        !branches.some(
+          (branch) =>
+            String(branch.id) === String(formData.branch_id)
+        )
+      ) {
+        alert("The selected branch is unavailable. Please select an active branch.");
+        return;
+      }
+
+      if (
+        branchStockText === "" ||
+        !Number.isFinite(initialBranchStock) ||
+        initialBranchStock < 0 ||
+        !Number.isInteger(initialBranchStock)
+      ) {
+        alert(
+          "Initial branch stock must be a non-negative whole number."
+        );
+        return;
+      }
     }
 
     try {
@@ -246,21 +345,17 @@ function Products() {
 
       const productData = new FormData();
 
-      productData.append("name", toInputValue(formData.name).trim());
-      productData.append(
-        "category",
-        toInputValue(formData.category).trim()
-      );
-      productData.append(
-        "description",
-        toInputValue(formData.description)
-      );
+      productData.append("name", name);
+      productData.append("category", category);
+      productData.append("description", description);
       productData.append("price", String(sellingPrice));
-      productData.append("unit", toInputValue(formData.unit).trim());
+      productData.append("unit", unit);
       productData.append("stock", String(stock));
-      productData.append("image", toInputValue(formData.image).trim());
+      productData.append(
+        "image",
+        toInputValue(formData.image).trim()
+      );
 
-      // Do not overwrite an existing buying price with an empty value.
       if (buyingPrice !== null) {
         productData.append("buying_price", String(buyingPrice));
       }
@@ -277,9 +372,17 @@ function Products() {
 
         alert("Product updated successfully.");
       } else {
+        productData.append("branch_id", String(branchId));
+        productData.append(
+          "initial_branch_stock",
+          String(initialBranchStock)
+        );
+
         await api.post("/products", productData);
 
-        alert("Product added successfully.");
+        alert(
+          "Product and initial branch stock added successfully."
+        );
       }
 
       resetForm();
@@ -313,6 +416,8 @@ function Products() {
       price: toInputValue(product.price),
       unit: toInputValue(product.unit),
       stock: toInputValue(product.stock),
+      branch_id: "",
+      initial_branch_stock: "",
       image: toInputValue(product.image),
     });
 
@@ -369,7 +474,6 @@ function Products() {
 
   return (
     <div className="container py-4">
-      {/* Header */}
       <div className="d-flex justify-content-between align-items-center mb-4 gap-3 flex-wrap">
         <div>
           <h2 className="fw-bold mb-1">Product Management</h2>
@@ -389,7 +493,6 @@ function Products() {
         </button>
       </div>
 
-      {/* Add/Edit Form */}
       {showForm && (
         <div className="card shadow-sm mb-4">
           <div className="card-body p-4">
@@ -399,7 +502,6 @@ function Products() {
 
             <form onSubmit={handleSubmit}>
               <div className="row g-3">
-                {/* Product name */}
                 <div className="col-md-6">
                   <label className="form-label">Product Name</label>
 
@@ -413,7 +515,6 @@ function Products() {
                   />
                 </div>
 
-                {/* Category */}
                 <div className="col-md-6">
                   <label className="form-label">Category</label>
 
@@ -428,7 +529,6 @@ function Products() {
                   />
                 </div>
 
-                {/* Buying price */}
                 <div className="col-md-4">
                   <label className="form-label">
                     Buying Price (KSh)
@@ -447,11 +547,10 @@ function Products() {
                   />
 
                   <small className="text-muted">
-                    What the agrovet pays to purchase one unit.
+                    Cost of purchasing one unit.
                   </small>
                 </div>
 
-                {/* Selling price */}
                 <div className="col-md-4">
                   <label className="form-label">
                     Selling Price (KSh)
@@ -469,11 +568,10 @@ function Products() {
                   />
 
                   <small className="text-muted">
-                    The price charged to customers.
+                    Price charged to customers.
                   </small>
                 </div>
 
-                {/* Unit */}
                 <div className="col-md-4">
                   <label className="form-label">Unit</label>
 
@@ -483,14 +581,15 @@ function Products() {
                     className="form-control"
                     value={formData.unit}
                     onChange={handleChange}
-                    placeholder="e.g. 750ml, 1L, 500g, 1kg, 1 pack"
+                    placeholder="e.g. 750ml, 1L, 500g, 1 pack"
                     required
                   />
                 </div>
 
-                {/* Stock */}
                 <div className="col-md-4">
-                  <label className="form-label">Stock</label>
+                  <label className="form-label">
+                    General Product Stock
+                  </label>
 
                   <input
                     type="number"
@@ -502,10 +601,84 @@ function Products() {
                     step="1"
                     required
                   />
+
+                  <small className="text-muted">
+                    General product inventory; separate from branch stock.
+                  </small>
                 </div>
 
-                {/* Gross profit preview */}
-                <div className="col-md-8">
+                {!editingProduct && (
+                  <>
+                    <div className="col-md-4">
+                      <label className="form-label">
+                        Branch <span className="text-danger">*</span>
+                      </label>
+
+                      <select
+                        name="branch_id"
+                        className="form-select"
+                        value={formData.branch_id}
+                        onChange={handleChange}
+                        disabled={loadingBranches || saving}
+                        required
+                      >
+                        <option value="">
+                          {loadingBranches
+                            ? "Loading branches..."
+                            : "Select a branch"}
+                        </option>
+
+                        {branches.map((branch) => (
+                          <option key={branch.id} value={branch.id}>
+                            {branch.name}
+                            {branch.code ? ` (${branch.code})` : ""}
+                          </option>
+                        ))}
+                      </select>
+
+                      {!loadingBranches && branches.length === 0 && (
+                        <small className="text-danger d-block mt-1">
+                          No active branches found. Check your branch setup
+                          and admin access.
+                        </small>
+                      )}
+                    </div>
+
+                    <div className="col-md-4">
+                      <label className="form-label">
+                        Initial Branch Stock{" "}
+                        <span className="text-danger">*</span>
+                      </label>
+
+                      <input
+                        type="number"
+                        name="initial_branch_stock"
+                        className="form-control"
+                        value={formData.initial_branch_stock}
+                        onChange={handleChange}
+                        min="0"
+                        step="1"
+                        placeholder="Quantity available at this branch"
+                        required
+                      />
+
+                      <small className="text-muted">
+                        Stock available to sell at the selected branch's POS.
+                      </small>
+                    </div>
+
+                    <div className="col-12">
+                      <div className="alert alert-info mb-0">
+                        <i className="bi bi-info-circle me-2"></i>
+                        The selected branch receives the initial branch
+                        stock. Other branches will not receive stock
+                        automatically.
+                      </div>
+                    </div>
+                  </>
+                )}
+
+                <div className={editingProduct ? "col-md-8" : "col-md-12"}>
                   <label className="form-label">
                     Gross Profit per Unit
                   </label>
@@ -517,12 +690,10 @@ function Products() {
                   </div>
 
                   <small className="text-muted">
-                    Selling price minus buying price. This is not net
-                    profit.
+                    Selling price minus buying price. This is not net profit.
                   </small>
                 </div>
 
-                {/* Description */}
                 <div className="col-12">
                   <label className="form-label">Description</label>
 
@@ -535,7 +706,6 @@ function Products() {
                   />
                 </div>
 
-                {/* Image upload */}
                 <div className="col-12">
                   <label className="form-label fw-semibold">
                     Upload Product Image
@@ -551,8 +721,8 @@ function Products() {
                     />
 
                     <small className="text-muted d-block mt-2">
-                      Select an image from your device. Supported formats:
-                      JPG, PNG, WEBP and GIF. Maximum size: 5 MB.
+                      Supported formats: JPG, PNG, WEBP and GIF.
+                      Maximum size: 5 MB.
                     </small>
 
                     {selectedImage && (
@@ -611,7 +781,6 @@ function Products() {
                   </div>
                 </div>
 
-                {/* Image URL */}
                 <div className="col-12">
                   <label className="form-label fw-semibold">
                     Or Use an Image URL
@@ -628,17 +797,20 @@ function Products() {
 
                   <small className="text-muted">
                     If you select an image from your device, that image
-                    will take priority over this URL.
+                    takes priority over this URL.
                   </small>
                 </div>
               </div>
 
-              {/* Form actions */}
               <div className="mt-4 d-flex gap-2 flex-wrap">
                 <button
                   type="submit"
                   className="btn btn-success"
-                  disabled={saving}
+                  disabled={
+                    saving ||
+                    (!editingProduct &&
+                      (loadingBranches || branches.length === 0))
+                  }
                 >
                   {saving ? (
                     <>
@@ -652,9 +824,7 @@ function Products() {
                   ) : (
                     <>
                       <i className="bi bi-check-lg me-2"></i>
-                      {editingProduct
-                        ? "Update Product"
-                        : "Save Product"}
+                      {editingProduct ? "Update Product" : "Save Product"}
                     </>
                   )}
                 </button>
@@ -673,7 +843,6 @@ function Products() {
         </div>
       )}
 
-      {/* Products table */}
       <div className="card shadow-sm">
         <div className="card-body">
           <div className="d-flex justify-content-between align-items-center mb-3 gap-2 flex-wrap">
@@ -718,7 +887,7 @@ function Products() {
                     <th>Selling Price</th>
                     <th>Gross Profit / Unit</th>
                     <th>Unit</th>
-                    <th>Stock</th>
+                    <th>General Stock</th>
                     <th>Status</th>
                     <th>Actions</th>
                   </tr>
@@ -874,3 +1043,4 @@ function Products() {
 }
 
 export default Products;
+

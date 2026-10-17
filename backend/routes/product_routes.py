@@ -11,13 +11,16 @@ from flask import (
     jsonify,
     request,
     send_from_directory,
-    current_app,
 )
 
 from werkzeug.utils import secure_filename
+from sqlalchemy.exc import IntegrityError
 
 from extensions import db
 from models.product import Product
+from models.branch import Branch
+from models.branch_product_stock import BranchProductStock
+
 from admin_auth import admin_required
 
 
@@ -90,7 +93,6 @@ def validate_image_file(file):
     if file.mimetype not in ALLOWED_IMAGE_MIMETYPES:
         return False, "The uploaded file must be an image."
 
-    # Read at most 1 byte beyond the permitted limit.
     file.stream.seek(0)
     image_bytes = file.stream.read(MAX_IMAGE_SIZE + 1)
     file.stream.seek(0)
@@ -101,7 +103,6 @@ def validate_image_file(file):
     if not image_bytes:
         return False, "The uploaded image is empty."
 
-    # Check common image file signatures.
     is_jpeg = image_bytes.startswith(b"\xff\xd8\xff")
 
     is_png = image_bytes.startswith(
@@ -147,9 +148,7 @@ def save_product_image(file):
     original_name = secure_filename(file.filename)
     extension = original_name.rsplit(".", 1)[1].lower()
 
-    unique_filename = (
-        f"{uuid.uuid4().hex}.{extension}"
-    )
+    unique_filename = f"{uuid.uuid4().hex}.{extension}"
 
     destination = PRODUCT_IMAGE_DIR / unique_filename
 
@@ -174,7 +173,6 @@ def delete_local_product_image(image_path):
 
     filename = image_path[len(prefix):]
 
-    # Only accept a plain filename, not a path.
     if not filename or Path(filename).name != filename:
         return
 
@@ -193,7 +191,7 @@ def delete_local_product_image(image_path):
 
 def get_request_data():
     """
-    Support both existing JSON requests and multipart form uploads.
+    Support existing JSON requests and multipart form uploads.
 
     JSON clients continue working as before.
     FormData clients can upload image_file.
@@ -222,7 +220,6 @@ def validate_image_url(value):
     if not value:
         return True
 
-    # Allow relative application paths.
     if value.startswith("/"):
         return not value.startswith("//")
 
@@ -283,6 +280,30 @@ def validate_stock(value):
         return None
 
 
+def validate_branch_id(value):
+    """Validate a positive integer branch ID."""
+    if isinstance(value, bool) or value is None:
+        return None
+
+    try:
+        branch_id = int(value)
+
+        if branch_id <= 0:
+            return None
+
+        if str(value).strip() != str(branch_id):
+            return None
+
+        return branch_id
+
+    except (
+        ValueError,
+        TypeError,
+        AttributeError,
+    ):
+        return None
+
+
 # ============================================================
 # SERVE UPLOADED PRODUCT IMAGES
 # ============================================================
@@ -292,10 +313,8 @@ def validate_stock(value):
     methods=["GET"],
 )
 def get_product_image(filename):
-    """
-    Serve product images uploaded through the admin interface.
-    """
-    # Do not allow subdirectories or traversal paths.
+    """Serve product images uploaded through the admin interface."""
+
     if Path(filename).name != filename:
         return jsonify({
             "status": "error",
@@ -318,7 +337,6 @@ def get_product_image(filename):
         conditional=True,
     )
 
-    # Product images are public catalogue assets.
     response.headers["X-Content-Type-Options"] = "nosniff"
 
     return response
@@ -362,6 +380,15 @@ def get_product(product_id):
 
 # ============================================================
 # CREATE PRODUCT — ADMIN ONLY
+#
+# POST /api/products
+#
+# Required branch fields:
+#   branch_id
+#   initial_branch_stock
+#
+# Product.stock remains separate from branch stock.
+# The product and branch stock are saved in one transaction.
 # ============================================================
 
 @product_bp.route("/api/products", methods=["POST"])
@@ -375,7 +402,10 @@ def create_product():
             "message": "A valid product payload is required.",
         }), 400
 
-    # Required text fields.
+    # --------------------------------------------------------
+    # VALIDATE REQUIRED PRODUCT FIELDS
+    # --------------------------------------------------------
+
     name = validate_product_text(data, "name")
     category = validate_product_text(data, "category")
     unit = validate_product_text(data, "unit")
@@ -393,10 +423,13 @@ def create_product():
                 "message": f"{field} must be a non-empty string.",
             }), 400
 
-    # Validate the buying cost and selling price.
-    # Buying price is required for newly created products so the
-    # profit report can calculate cost of goods sold accurately.
-    buying_price = validate_price(data.get("buying_price"))
+    # --------------------------------------------------------
+    # VALIDATE BUYING AND SELLING PRICES
+    # --------------------------------------------------------
+
+    buying_price = validate_price(
+        data.get("buying_price")
+    )
 
     if buying_price is None:
         return jsonify({
@@ -416,7 +449,10 @@ def create_product():
             ),
         }), 400
 
-    # Validate stock.
+    # --------------------------------------------------------
+    # VALIDATE GLOBAL PRODUCT STOCK
+    # --------------------------------------------------------
+
     stock = validate_stock(data.get("stock", 0))
 
     if stock is None:
@@ -425,7 +461,37 @@ def create_product():
             "message": "Stock must be a non-negative integer.",
         }), 400
 
-    # Validate active status.
+    # --------------------------------------------------------
+    # VALIDATE INITIAL BRANCH STOCK
+    # --------------------------------------------------------
+
+    branch_id = validate_branch_id(
+        data.get("branch_id")
+    )
+
+    if branch_id is None:
+        return jsonify({
+            "status": "error",
+            "message": "Select a valid branch.",
+        }), 400
+
+    initial_branch_stock = validate_stock(
+        data.get("initial_branch_stock")
+    )
+
+    if initial_branch_stock is None:
+        return jsonify({
+            "status": "error",
+            "message": (
+                "Initial branch stock must be a "
+                "non-negative integer."
+            ),
+        }), 400
+
+    # --------------------------------------------------------
+    # VALIDATE ACTIVE STATUS
+    # --------------------------------------------------------
+
     is_active = data.get("is_active", True)
 
     if isinstance(is_active, str):
@@ -447,7 +513,10 @@ def create_product():
             "message": "is_active must be true or false.",
         }), 400
 
-    # Validate description.
+    # --------------------------------------------------------
+    # VALIDATE DESCRIPTION
+    # --------------------------------------------------------
+
     description = data.get("description", "")
 
     if description is not None and not isinstance(
@@ -458,7 +527,10 @@ def create_product():
             "message": "Description must be a string.",
         }), 400
 
-    # Validate the existing image URL option.
+    # --------------------------------------------------------
+    # VALIDATE IMAGE URL
+    # --------------------------------------------------------
+
     image_url = data.get("image", "")
 
     if not validate_image_url(image_url):
@@ -468,11 +540,38 @@ def create_product():
         }), 400
 
     uploaded_file = request.files.get("image_file")
-
     saved_image_path = None
 
     try:
-        # An uploaded image takes priority over an image URL.
+        # ----------------------------------------------------
+        # VALIDATE SELECTED BRANCH
+        # ----------------------------------------------------
+
+        branch = db.session.execute(
+            select(Branch)
+            .where(Branch.id == branch_id)
+            .with_for_update()
+        ).scalar_one_or_none()
+
+        if branch is None:
+            return jsonify({
+                "status": "error",
+                "message": "The selected branch does not exist.",
+            }), 404
+
+        if not branch.is_active:
+            return jsonify({
+                "status": "error",
+                "message": (
+                    "Products can only be assigned initial stock "
+                    "to an active branch."
+                ),
+            }), 400
+
+        # ----------------------------------------------------
+        # PREPARE PRODUCT IMAGE
+        # ----------------------------------------------------
+
         if uploaded_file and uploaded_file.filename:
             valid, error_message = validate_image_file(
                 uploaded_file
@@ -493,6 +592,10 @@ def create_product():
         else:
             image_value = image_url.strip() or None
 
+        # ----------------------------------------------------
+        # CREATE PRODUCT
+        # ----------------------------------------------------
+
         product = Product(
             name=name,
             category=category,
@@ -506,19 +609,59 @@ def create_product():
         )
 
         db.session.add(product)
+
+        # Flush obtains the product ID without committing.
+        db.session.flush()
+
+        # ----------------------------------------------------
+        # CREATE INITIAL STOCK FOR THE SELECTED BRANCH
+        # ----------------------------------------------------
+
+        branch_stock = BranchProductStock(
+            branch_id=branch.id,
+            product_id=product.id,
+            quantity=initial_branch_stock,
+        )
+
+        db.session.add(branch_stock)
+
+        # A single commit makes both database records atomic.
         db.session.commit()
 
         return jsonify({
             "status": "success",
-            "message": "Product created successfully.",
+            "message": "Product and initial branch stock created successfully.",
             "product": product.to_dict(),
+            "branch_stock": {
+                "branch_id": branch.id,
+                "branch_name": branch.name,
+                "product_id": product.id,
+                "quantity": branch_stock.quantity,
+            },
         }), 201
+
+    except IntegrityError:
+        db.session.rollback()
+
+        if saved_image_path:
+            delete_local_product_image(saved_image_path)
+
+        logger.exception(
+            "Database constraint failure while creating product."
+        )
+
+        return jsonify({
+            "status": "error",
+            "message": (
+                "The product or branch stock could not be created "
+                "because of a database constraint. No database "
+                "changes were saved."
+            ),
+        }), 409
 
     except Exception:
         db.session.rollback()
 
-        # Avoid leaving an uploaded file behind if saving the
-        # product record fails.
         if saved_image_path:
             delete_local_product_image(saved_image_path)
 
@@ -532,6 +675,9 @@ def create_product():
 
 # ============================================================
 # UPDATE PRODUCT — ADMIN ONLY
+#
+# Editing a product does not modify branch inventory.
+# Branch stock is managed through the branch stock endpoint.
 # ============================================================
 
 @product_bp.route(
@@ -570,9 +716,11 @@ def update_product(product_id):
                     ),
                 }), 400
 
-    # Validate buying price. If omitted, preserve the existing value.
+    # Validate buying price.
     if "buying_price" in data:
-        buying_price = validate_price(data["buying_price"])
+        buying_price = validate_price(
+            data["buying_price"]
+        )
 
         if buying_price is None:
             return jsonify({
@@ -584,8 +732,7 @@ def update_product(product_id):
 
         product.buying_price = buying_price
 
-    # Validate selling price. The existing API field remains "price"
-    # to avoid breaking customer catalogue, cart, and checkout code.
+    # Validate selling price.
     if "price" in data:
         price = validate_price(data["price"])
 
@@ -599,7 +746,7 @@ def update_product(product_id):
 
         product.price = price
 
-    # Validate stock.
+    # Product.stock remains independent of branch inventory.
     if "stock" in data:
         stock = validate_stock(data["stock"])
 
@@ -658,8 +805,6 @@ def update_product(product_id):
 
         product.description = description
 
-    # Track old and new images so failed updates do not break
-    # existing product image references.
     old_image_path = product.image
     saved_image_path = None
 
@@ -681,7 +826,6 @@ def update_product(product_id):
                 uploaded_file
             )
 
-            # Uploaded image takes priority over the URL.
             product.image = saved_image_path
 
         elif "image" in data:
@@ -697,13 +841,9 @@ def update_product(product_id):
 
             product.image = image_url.strip() or None
 
-        # If neither image_file nor image was supplied,
-        # preserve the existing image.
-
         db.session.commit()
 
-        # Only delete the old image after the database commit
-        # succeeds, and only if the image reference changed.
+        # Delete the old local image only after commit succeeds.
         if (
             old_image_path
             and old_image_path != product.image
@@ -714,7 +854,7 @@ def update_product(product_id):
             "status": "success",
             "message": "Product updated successfully.",
             "product": product.to_dict(),
-        })
+        }), 200
 
     except Exception:
         db.session.rollback()
@@ -757,7 +897,7 @@ def delete_product(product_id):
         return jsonify({
             "status": "success",
             "message": "Product deactivated successfully.",
-        })
+        }), 200
 
     except Exception:
         db.session.rollback()
@@ -768,3 +908,4 @@ def delete_product(product_id):
             "status": "error",
             "message": "Unable to deactivate product.",
         }), 500
+

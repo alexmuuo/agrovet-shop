@@ -34,6 +34,7 @@ import AdminLogin from "./pages/AdminLogin";
 import AdminStockHistory from "./pages/seller/StockHistory";
 import Sales from "./pages/seller/Sales";
 import Branches from "./pages/seller/Branches";
+import POSSales from "./pages/seller/POSSales";
 
 // Cashier pages
 import CashierLogin from "./pages/cashier/CashierLogin";
@@ -167,6 +168,7 @@ return (
         element={<Branches />}
       />
     </Route>
+    <Route path="/admin/pos-sales" element={<POSSales />} />
 
     {/* CASHIER LOGIN */}
     <Route
