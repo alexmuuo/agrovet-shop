@@ -579,7 +579,7 @@ function CashierPOS() {
     <div className="pos-receipt-overlay">
       <div className="pos-receipt">
         <div className="pos-receipt-header">
-          <h2>Agrovet Sales Receipt</h2>
+          <h2>Headmaster Liquors Receipt</h2>
 
           <p>
             {receipt.payment_method === "mpesa" &&
@@ -731,8 +731,9 @@ function CashierPOS() {
       <div className="pos-page" style={styles.page}>
         <header style={styles.header}>
           <div>
-            <h1 style={styles.heading}>Headmaster Liquors POS</h1>
-            <p style={styles.subheading}>Point of Sale · Counter Sales</p>
+<h1 style={{ ...styles.heading, fontStyle: "italic" }}>
+  Headmaster Liquors POS
+</h1>            <p style={styles.subheading}>Point of Sale · Counter Sales</p>
           </div>
 
           <div style={styles.headerRight}>
