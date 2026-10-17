@@ -731,7 +731,7 @@ function CashierPOS() {
       <div className="pos-page" style={styles.page}>
         <header style={styles.header}>
           <div>
-            <h1 style={styles.heading}>Agrovet POS</h1>
+            <h1 style={styles.heading}>Headmaster Liquors POS</h1>
             <p style={styles.subheading}>Point of Sale · Counter Sales</p>
           </div>
 

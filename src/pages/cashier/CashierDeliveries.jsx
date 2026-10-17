@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 
-const API_BASE = "https://agrovet-api-a00w.onrender.com";
+const API_BASE = "https://agrovet-api-a00w.onrender.com/api";
 
 const DELIVERY_STATUSES = [
   { value: "pending", label: "Pending" },

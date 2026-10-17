@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import axios from "axios";
 
-const API_BASE = "https://agrovet-api-a00w.onrender.com";
+const API_BASE = "https://agrovet-api-a00w.onrender.com/api";
 
 function formatDate(value) {
 if (!value) return "—";
