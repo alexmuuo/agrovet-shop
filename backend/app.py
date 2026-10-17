@@ -145,6 +145,10 @@ from models.payment import Payment
 from models.cashier import Cashier
 from models.cash_collection import CashCollection
 from models.stock_movement import StockMovement
+from models.branch import Branch
+from models.branch_product_stock import BranchProductStock
+from models.cashier_sale import CashierSale, CashierSaleItem
+from models.cashier_sale_payment import CashierSalePayment
 
 # --------------------------------------------------
 # IMPORT ROUTES

@@ -13,6 +13,11 @@ from models.customer import Customer
 from models.notification import Notification
 from models.cash_collection import CashCollection
 from models.stock_movement import StockMovement
+from models.branch import Branch
+from models.branch_product_stock import BranchProductStock
+from models.cashier import Cashier
+from models.cashier_sale import CashierSale
+
 from admin_auth import admin_required
 
 
@@ -1686,4 +1691,546 @@ def get_admin_stock_history():
         return jsonify({
             "status": "error",
             "message": "Unable to retrieve stock history."
+        }), 500
+   # ============================================================
+# BRANCH MANAGEMENT
+# ============================================================
+
+
+# ------------------------------------------------------------
+# GET ALL BRANCHES
+# GET /api/admin/branches
+# ------------------------------------------------------------
+
+@admin_bp.route(
+    "/api/admin/branches",
+    methods=["GET"]
+)
+@admin_required
+def get_branches():
+    try:
+        branches = Branch.query.order_by(
+            Branch.id.asc()
+        ).all()
+
+        cashier_counts = dict(
+            db.session.query(
+                Cashier.branch_id,
+                func.count(Cashier.id)
+            )
+            .filter(
+                Cashier.branch_id.isnot(None)
+            )
+            .group_by(
+                Cashier.branch_id
+            )
+            .all()
+        )
+
+        return jsonify({
+            "status": "success",
+            "branches": [
+                {
+                    "id": branch.id,
+                    "name": branch.name,
+                    "code": branch.code,
+                    "is_active": branch.is_active,
+                    "cashier_count": cashier_counts.get(
+                        branch.id,
+                        0
+                    ),
+                }
+                for branch in branches
+            ],
+        }), 200
+
+    except Exception:
+        db.session.rollback()
+
+        logger.exception(
+            "Failed to retrieve branches."
+        )
+
+        return jsonify({
+            "status": "error",
+            "message": "Unable to retrieve branches.",
+        }), 500
+
+
+# ------------------------------------------------------------
+# GET BRANCH STOCK
+# GET /api/admin/branches/<branch_id>/stock
+# ------------------------------------------------------------
+
+@admin_bp.route(
+    "/api/admin/branches/<int:branch_id>/stock",
+    methods=["GET"]
+)
+@admin_required
+def get_branch_stock_admin(branch_id):
+    try:
+        branch = db.session.get(
+            Branch,
+            branch_id
+        )
+
+        if branch is None:
+            return jsonify({
+                "status": "error",
+                "message": "Branch not found.",
+            }), 404
+
+        records = (
+            db.session.query(
+                BranchProductStock,
+                Product
+            )
+            .join(
+                Product,
+                Product.id == BranchProductStock.product_id
+            )
+            .filter(
+                BranchProductStock.branch_id == branch_id
+            )
+            .order_by(
+                Product.name.asc()
+            )
+            .all()
+        )
+
+        products = [
+            {
+                "id": product.id,
+                "product_id": product.id,
+                "name": product.name,
+                "category": product.category,
+                "price": float(product.price or 0),
+                "quantity": stock.quantity,
+            }
+            for stock, product in records
+        ]
+
+        return jsonify({
+            "status": "success",
+            "branch": {
+                "id": branch.id,
+                "name": branch.name,
+                "code": branch.code,
+            },
+
+            # Support both response formats used by the frontend.
+            "products": products,
+            "stock": products,
+        }), 200
+
+    except Exception:
+        db.session.rollback()
+
+        logger.exception(
+            "Failed to retrieve stock for branch ID %s.",
+            branch_id
+        )
+
+        return jsonify({
+            "status": "error",
+            "message": "Unable to retrieve branch stock.",
+        }), 500
+
+
+# ------------------------------------------------------------
+# UPDATE BRANCH STOCK
+# PUT /api/admin/branches/<branch_id>/stock/<product_id>
+#
+# Changes stock for the selected branch only.
+# Does not change Product.stock.
+# ------------------------------------------------------------
+
+@admin_bp.route(
+    "/api/admin/branches/<int:branch_id>/stock/<int:product_id>",
+    methods=["PUT"]
+)
+@admin_required
+def update_branch_stock_admin(
+    branch_id,
+    product_id
+):
+    data = request.get_json(silent=True)
+
+    if not isinstance(data, dict):
+        return jsonify({
+            "status": "error",
+            "message": "A valid JSON request body is required.",
+        }), 400
+
+    quantity = data.get("quantity")
+
+    if (
+        isinstance(quantity, bool)
+        or not isinstance(quantity, int)
+        or quantity < 0
+    ):
+        return jsonify({
+            "status": "error",
+            "message": (
+                "Quantity must be a non-negative integer."
+            ),
+        }), 400
+
+    try:
+        branch = db.session.get(
+            Branch,
+            branch_id
+        )
+
+        if branch is None:
+            return jsonify({
+                "status": "error",
+                "message": "Branch not found.",
+            }), 404
+
+        product = db.session.get(
+            Product,
+            product_id
+        )
+
+        if product is None:
+            return jsonify({
+                "status": "error",
+                "message": "Product not found.",
+            }), 404
+
+        if not branch.is_active:
+            return jsonify({
+                "status": "error",
+                "message": "This branch is inactive.",
+            }), 400
+
+        stock = (
+            BranchProductStock.query
+            .filter_by(
+                branch_id=branch_id,
+                product_id=product_id
+            )
+            .with_for_update()
+            .first()
+        )
+
+        if stock is None:
+            stock = BranchProductStock(
+                branch_id=branch_id,
+                product_id=product_id,
+                quantity=quantity,
+            )
+
+            db.session.add(stock)
+
+        else:
+            stock.quantity = quantity
+
+        db.session.commit()
+
+        return jsonify({
+            "status": "success",
+            "message": "Branch stock updated successfully.",
+            "branch_id": branch_id,
+            "product_id": product_id,
+            "quantity": quantity,
+        }), 200
+
+    except IntegrityError:
+        db.session.rollback()
+
+        logger.exception(
+            "Stock update constraint failure: branch=%s product=%s",
+            branch_id,
+            product_id
+        )
+
+        return jsonify({
+            "status": "error",
+            "message": "The stock update conflicted with a database constraint.",
+        }), 409
+
+    except Exception:
+        db.session.rollback()
+
+        logger.exception(
+            "Failed to update branch stock: branch=%s product=%s",
+            branch_id,
+            product_id
+        )
+
+        return jsonify({
+            "status": "error",
+            "message": "Unable to update branch stock.",
+        }), 500
+
+
+# ------------------------------------------------------------
+# GET CASHIERS FOR BRANCH MANAGEMENT
+# GET /api/admin/branches/<branch_id>/cashiers
+#
+# Returns ALL cashiers, including those assigned to other
+# branches or not assigned to any branch.
+# ------------------------------------------------------------
+
+@admin_bp.route(
+    "/api/admin/branches/<int:branch_id>/cashiers",
+    methods=["GET"]
+)
+@admin_required
+def get_branch_cashiers(branch_id):
+    try:
+        branch = db.session.get(
+            Branch,
+            branch_id
+        )
+
+        if branch is None:
+            return jsonify({
+                "status": "error",
+                "message": "Branch not found.",
+            }), 404
+
+        cashiers = Cashier.query.order_by(
+            Cashier.username.asc()
+        ).all()
+
+        branch_ids = {
+            cashier.branch_id
+            for cashier in cashiers
+            if cashier.branch_id is not None
+        }
+
+        branches = Branch.query.filter(
+            Branch.id.in_(branch_ids)
+        ).all() if branch_ids else []
+
+        branch_names = {
+            item.id: item.name
+            for item in branches
+        }
+
+        return jsonify({
+            "status": "success",
+            "branch": {
+                "id": branch.id,
+                "name": branch.name,
+                "code": branch.code,
+            },
+            "cashiers": [
+                {
+                    "id": cashier.id,
+                    "username": cashier.username,
+                    "full_name": cashier.full_name,
+                    "is_active": cashier.is_active,
+                    "branch_id": cashier.branch_id,
+                    "branch_name": branch_names.get(
+                        cashier.branch_id
+                    ),
+                }
+                for cashier in cashiers
+            ],
+        }), 200
+
+    except Exception:
+        db.session.rollback()
+
+        logger.exception(
+            "Failed to retrieve cashiers for branch ID %s.",
+            branch_id
+        )
+
+        return jsonify({
+            "status": "error",
+            "message": "Unable to retrieve branch cashiers.",
+        }), 500
+
+
+# ------------------------------------------------------------
+# ASSIGN OR UNASSIGN CASHIER
+# PUT /api/admin/cashiers/<cashier_id>/branch
+#
+# Assign:
+# {"branch_id": 1}
+#
+# Unassign:
+# {"branch_id": null}
+# ------------------------------------------------------------
+
+@admin_bp.route(
+    "/api/admin/cashiers/<int:cashier_id>/branch",
+    methods=["PUT"]
+)
+@admin_required
+def assign_cashier_branch(cashier_id):
+    data = request.get_json(silent=True)
+
+    if not isinstance(data, dict):
+        return jsonify({
+            "status": "error",
+            "message": "A valid JSON request body is required.",
+        }), 400
+
+    if "branch_id" not in data:
+        return jsonify({
+            "status": "error",
+            "message": "The branch_id field is required.",
+        }), 400
+
+    branch_id = data["branch_id"]
+
+    if branch_id is not None and (
+        isinstance(branch_id, bool)
+        or not isinstance(branch_id, int)
+        or branch_id <= 0
+    ):
+        return jsonify({
+            "status": "error",
+            "message": (
+                "branch_id must be a positive integer or null."
+            ),
+        }), 400
+
+    try:
+        cashier = db.session.execute(
+            select(Cashier)
+            .where(Cashier.id == cashier_id)
+            .with_for_update()
+        ).scalar_one_or_none()
+
+        if cashier is None:
+            return jsonify({
+                "status": "error",
+                "message": "Cashier not found.",
+            }), 404
+
+        if branch_id is None:
+            cashier.branch_id = None
+
+        else:
+            branch = db.session.get(
+                Branch,
+                branch_id
+            )
+
+            if branch is None:
+                return jsonify({
+                    "status": "error",
+                    "message": "Branch not found.",
+                }), 404
+
+            if not branch.is_active:
+                return jsonify({
+                    "status": "error",
+                    "message": (
+                        "Cannot assign a cashier to an inactive branch."
+                    ),
+                }), 400
+
+            cashier.branch_id = branch.id
+
+        db.session.commit()
+
+        return jsonify({
+            "status": "success",
+            "message": (
+                "Cashier unassigned successfully."
+                if cashier.branch_id is None
+                else "Cashier assigned successfully."
+            ),
+            "cashier": {
+                "id": cashier.id,
+                "username": cashier.username,
+                "branch_id": cashier.branch_id,
+            },
+        }), 200
+
+    except IntegrityError:
+        db.session.rollback()
+
+        logger.exception(
+            "Branch assignment constraint failure for cashier %s.",
+            cashier_id
+        )
+
+        return jsonify({
+            "status": "error",
+            "message": "The cashier assignment could not be saved.",
+        }), 409
+
+    except Exception:
+        db.session.rollback()
+
+        logger.exception(
+            "Failed to assign cashier ID %s to a branch.",
+            cashier_id
+        )
+
+        return jsonify({
+            "status": "error",
+            "message": "Unable to update cashier assignment.",
+        }), 500
+
+
+# ------------------------------------------------------------
+# GET POS SALES FOR A BRANCH
+# GET /api/admin/branches/<branch_id>/sales
+#
+# Returns cashier POS sales only.
+# Website customer orders remain separate.
+# ------------------------------------------------------------
+
+@admin_bp.route(
+    "/api/admin/branches/<int:branch_id>/sales",
+    methods=["GET"]
+)
+@admin_required
+def get_branch_pos_sales(branch_id):
+    try:
+        branch = db.session.get(
+            Branch,
+            branch_id
+        )
+
+        if branch is None:
+            return jsonify({
+                "status": "error",
+                "message": "Branch not found.",
+            }), 404
+
+        sales = (
+            CashierSale.query
+            .filter_by(
+                branch_id=branch_id
+            )
+            .order_by(
+                CashierSale.created_at.desc(),
+                CashierSale.id.desc()
+            )
+            .limit(200)
+            .all()
+        )
+
+        return jsonify({
+            "status": "success",
+            "branch_id": branch.id,
+            "branch_name": branch.name,
+            "sales": [
+                sale.to_dict()
+                for sale in sales
+            ],
+        }), 200
+
+    except Exception:
+        db.session.rollback()
+
+        logger.exception(
+            "Failed to retrieve POS sales for branch ID %s.",
+            branch_id
+        )
+
+        return jsonify({
+            "status": "error",
+            "message": "Unable to retrieve branch POS sales.",
         }), 500

@@ -1,6 +1,9 @@
 from datetime import datetime
 
-from werkzeug.security import generate_password_hash, check_password_hash
+from werkzeug.security import (
+    generate_password_hash,
+    check_password_hash
+)
 
 from extensions import db
 
@@ -8,14 +11,20 @@ from extensions import db
 class Cashier(db.Model):
     __tablename__ = "cashiers"
 
-    # Primary key
+    # --------------------------------------------------
+    # PRIMARY KEY
+    # --------------------------------------------------
+
     id = db.Column(
         db.Integer,
         primary_key=True,
         autoincrement=True
     )
 
-    # Account information
+    # --------------------------------------------------
+    # ACCOUNT INFORMATION
+    # --------------------------------------------------
+
     username = db.Column(
         db.String(80),
         nullable=False,
@@ -28,20 +37,44 @@ class Cashier(db.Model):
         nullable=False
     )
 
-    # Store hashed passwords, never plain-text passwords
     password_hash = db.Column(
         db.String(255),
         nullable=False
     )
 
-    # Account status
+    # --------------------------------------------------
+    # BRANCH ASSIGNMENT
+    # --------------------------------------------------
+
+    branch_id = db.Column(
+        db.Integer,
+        db.ForeignKey(
+            "branches.id",
+            ondelete="RESTRICT"
+        ),
+        nullable=True,
+        index=True
+    )
+
+    branch = db.relationship(
+        "Branch",
+        back_populates="cashiers"
+    )
+
+    # --------------------------------------------------
+    # ACCOUNT STATUS
+    # --------------------------------------------------
+
     is_active = db.Column(
         db.Boolean,
         nullable=False,
         default=True
     )
 
-    # Account creation timestamp
+    # --------------------------------------------------
+    # TIMESTAMP
+    # --------------------------------------------------
+
     created_at = db.Column(
         db.DateTime,
         nullable=False,
@@ -54,7 +87,9 @@ class Cashier(db.Model):
 
     def set_password(self, password):
         """Hash and save the cashier's password."""
-        self.password_hash = generate_password_hash(password)
+        self.password_hash = generate_password_hash(
+            password
+        )
 
     def check_password(self, password):
         """Verify a supplied password."""
@@ -73,6 +108,12 @@ class Cashier(db.Model):
             "id": self.id,
             "username": self.username,
             "full_name": self.full_name,
+            "branch_id": self.branch_id,
+            "branch_name": (
+                self.branch.name
+                if self.branch
+                else None
+            ),
             "is_active": self.is_active,
             "created_at": (
                 self.created_at.isoformat()
@@ -81,5 +122,10 @@ class Cashier(db.Model):
             )
         }
 
+    # --------------------------------------------------
+    # REPRESENTATION
+    # --------------------------------------------------
+
     def __repr__(self):
         return f"<Cashier {self.username}>"
+
