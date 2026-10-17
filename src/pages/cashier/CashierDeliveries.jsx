@@ -17,6 +17,7 @@ const styles = {
     margin: "0 auto",
     padding: "24px",
     color: "#1f2937",
+    boxSizing: "border-box",
   },
   header: {
     display: "flex",
@@ -35,6 +36,7 @@ const styles = {
     color: "#6b7280",
     marginTop: "6px",
     marginBottom: 0,
+    lineHeight: 1.5,
   },
   button: {
     border: "none",
@@ -51,11 +53,13 @@ const styles = {
   },
   input: {
     width: "100%",
+    minWidth: 0,
     padding: "11px 12px",
     border: "1px solid #d1d5db",
     borderRadius: "8px",
     background: "#fff",
     boxSizing: "border-box",
+    fontSize: "14px",
   },
   summaryGrid: {
     display: "grid",
@@ -78,6 +82,7 @@ const styles = {
   summaryValue: {
     fontSize: "25px",
     fontWeight: 700,
+    overflowWrap: "anywhere",
   },
   tableContainer: {
     overflowX: "auto",
@@ -88,7 +93,7 @@ const styles = {
   table: {
     width: "100%",
     borderCollapse: "collapse",
-    minWidth: "1350px",
+    minWidth: "1500px",
   },
   th: {
     textAlign: "left",
@@ -135,6 +140,22 @@ const styles = {
     textAlign: "center",
     padding: "40px 20px",
     color: "#6b7280",
+  },
+  riderForm: {
+    display: "flex",
+    flexDirection: "column",
+    gap: "8px",
+    minWidth: "190px",
+  },
+  riderLabel: {
+    fontSize: "12px",
+    fontWeight: 600,
+    color: "#4b5563",
+  },
+  mutedText: {
+    color: "#6b7280",
+    fontSize: "12px",
+    lineHeight: 1.5,
   },
 };
 
@@ -221,19 +242,30 @@ function getCustomer(order) {
   return customer;
 }
 
+function getOrderStatus(order) {
+  return String(order?.status || "").toLowerCase();
+}
+
+function isCancelledOrder(order) {
+  return ["cancelled", "canceled"].includes(getOrderStatus(order));
+}
+
 export default function CashierDeliveries() {
   const [deliveries, setDeliveries] = useState([]);
+
   const [deliveryStatus, setDeliveryStatus] = useState("all");
   const [paymentStatus, setPaymentStatus] = useState("all");
   const [search, setSearch] = useState("");
 
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [lastUpdated, setLastUpdated] = useState(null);
 
   const [pendingStatuses, setPendingStatuses] = useState({});
+  const [riderForms, setRiderForms] = useState({});
   const [savingOrderId, setSavingOrderId] = useState(null);
 
   const loadDeliveries = useCallback(
@@ -330,6 +362,31 @@ export default function CashierDeliveries() {
           return next;
         });
 
+        setRiderForms((previous) => {
+          const next = { ...previous };
+
+          data.deliveries.forEach((order) => {
+            const existingForm = next[order.id];
+
+            // Populate from the server on first load. When the saved
+            // rider changes on the server, refresh the form accordingly.
+            if (
+              !existingForm ||
+              (existingForm.delivery_person ===
+                String(order.delivery_person || "") &&
+                existingForm.delivery_phone ===
+                  String(order.delivery_phone || ""))
+            ) {
+              next[order.id] = {
+                delivery_person: String(order.delivery_person || ""),
+                delivery_phone: String(order.delivery_phone || ""),
+              };
+            }
+          });
+
+          return next;
+        });
+
         setLastUpdated(new Date());
       } catch (err) {
         console.error("Cashier deliveries error:", err);
@@ -350,6 +407,129 @@ export default function CashierDeliveries() {
     return () => clearTimeout(timeout);
   }, [loadDeliveries, search]);
 
+  const handleRiderChange = (orderId, field, value) => {
+    setRiderForms((previous) => ({
+      ...previous,
+      [orderId]: {
+        delivery_person:
+          previous[orderId]?.delivery_person || "",
+        delivery_phone:
+          previous[orderId]?.delivery_phone || "",
+        [field]: value,
+      },
+    }));
+
+    setError("");
+    setNotice("");
+  };
+
+  const assignRider = async (order) => {
+    if (isCancelledOrder(order)) {
+      setError("A rider cannot be assigned to a cancelled order.");
+      return;
+    }
+
+    const form = riderForms[order.id] || {
+      delivery_person: String(order.delivery_person || ""),
+      delivery_phone: String(order.delivery_phone || ""),
+    };
+
+    const deliveryPerson = String(form.delivery_person || "").trim();
+    const deliveryPhone = String(form.delivery_phone || "").trim();
+
+    if (!deliveryPerson) {
+      setError("Enter the delivery person's name before assigning the rider.");
+      return;
+    }
+
+    if (!deliveryPhone) {
+      setError("Enter the delivery person's phone number before assigning the rider.");
+      return;
+    }
+
+    const existingPerson = String(order.delivery_person || "").trim();
+    const existingPhone = String(order.delivery_phone || "").trim();
+
+    if (
+      deliveryPerson === existingPerson &&
+      deliveryPhone === existingPhone
+    ) {
+      setNotice("The assigned rider details have not changed.");
+      setError("");
+      return;
+    }
+
+    const confirmed = window.confirm(
+      `Assign ${deliveryPerson} (${deliveryPhone}) to delivery ${
+        order.order_number || `#${order.id}`
+      }?`
+    );
+
+    if (!confirmed) return;
+
+    const token = localStorage.getItem("cashierToken");
+
+    if (!token) {
+      setError("Your cashier session is missing. Please log in again.");
+      return;
+    }
+
+    setSavingOrderId(order.id);
+    setError("");
+    setNotice("");
+
+    try {
+      const response = await fetch(
+        `${API_BASE}/cashier/orders/${order.id}/delivery/assign`,
+        {
+          method: "PUT",
+          headers: {
+            Authorization: `Bearer ${token}`,
+            Accept: "application/json",
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            delivery_person: deliveryPerson,
+            delivery_phone: deliveryPhone,
+          }),
+        }
+      );
+
+      const data = await response.json().catch(() => ({}));
+
+      if (response.status === 401) {
+        throw new Error(
+          data.message ||
+            "Your cashier session has expired. Please log in again."
+        );
+      }
+
+      if (response.status === 403) {
+        throw new Error(
+          data.message ||
+            "You are not authorized to assign this delivery."
+        );
+      }
+
+      if (!response.ok || data.status !== "success") {
+        throw new Error(data.message || "Unable to assign the delivery person.");
+      }
+
+      setNotice(
+        `Delivery person ${deliveryPerson} assigned successfully to ${
+          order.order_number || `#${order.id}`
+        }.`
+      );
+
+      await loadDeliveries(false);
+    } catch (err) {
+      console.error("Delivery rider assignment error:", err);
+      setError(err.message || "Unable to assign the delivery person.");
+    } finally {
+      setSavingOrderId(null);
+    }
+  };
+
   const updateDeliveryStatus = async (order) => {
     const selectedStatus = pendingStatuses[order.id];
 
@@ -361,10 +541,7 @@ export default function CashierDeliveries() {
       return;
     }
 
-    if (
-      String(order.status || "").toLowerCase() === "cancelled" ||
-      String(order.status || "").toLowerCase() === "canceled"
-    ) {
+    if (isCancelledOrder(order)) {
       setError("Delivery status cannot be changed for a cancelled order.");
       return;
     }
@@ -374,7 +551,7 @@ export default function CashierDeliveries() {
       !String(order.delivery_person || "").trim()
     ) {
       setError(
-        "Assign a delivery person through the authorized admin workflow before moving this delivery to dispatched, in transit, or delivered."
+        "Assign a delivery person before moving this delivery to dispatched, in transit, or delivered."
       );
       return;
     }
@@ -479,14 +656,19 @@ export default function CashierDeliveries() {
       String(order.delivery_status || "").toLowerCase() === "delivered"
   ).length;
 
+  const assignedCount = deliveries.filter(
+    (order) => String(order.delivery_person || "").trim() !== ""
+  ).length;
+
   return (
     <main style={styles.page}>
       <header style={styles.header}>
         <div>
           <h1 style={styles.title}>Delivery Records</h1>
+
           <p style={styles.subtitle}>
-            View delivery orders shared with the admin dashboard and update
-            delivery progress.
+            View delivery orders, assign riders, and update delivery progress.
+            Changes are shared with the admin dashboard.
           </p>
         </div>
 
@@ -499,6 +681,10 @@ export default function CashierDeliveries() {
             background: "#166534",
             color: "#fff",
             opacity: refreshing ? 0.7 : 1,
+            cursor:
+              refreshing || savingOrderId !== null
+                ? "not-allowed"
+                : "pointer",
           }}
         >
           {refreshing ? "Refreshing..." : "↻ Refresh"}
@@ -508,6 +694,7 @@ export default function CashierDeliveries() {
       {error && (
         <div style={styles.error} role="alert">
           <strong>Delivery operation failed.</strong>
+
           <div style={{ marginTop: "6px" }}>{error}</div>
 
           <button
@@ -558,18 +745,18 @@ export default function CashierDeliveries() {
         </div>
 
         <div style={styles.summaryCard}>
+          <div style={styles.summaryLabel}>Riders Assigned</div>
+          <div style={styles.summaryValue}>{assignedCount}</div>
+        </div>
+
+        <div style={styles.summaryCard}>
           <div style={styles.summaryLabel}>Delivered</div>
           <div style={styles.summaryValue}>{deliveredCount}</div>
         </div>
 
         <div style={styles.summaryCard}>
           <div style={styles.summaryLabel}>Value of Matching Orders</div>
-          <div
-            style={{
-              ...styles.summaryValue,
-              fontSize: "22px",
-            }}
-          >
+          <div style={{ ...styles.summaryValue, fontSize: "22px" }}>
             {formatMoney(totalValue)}
           </div>
         </div>
@@ -648,7 +835,7 @@ export default function CashierDeliveries() {
                   "Order",
                   "Customer",
                   "Delivery Location",
-                  "Delivery Person",
+                  "Assign Delivery Person",
                   "Order Total",
                   "Payment",
                   "Current Delivery Status",
@@ -670,19 +857,19 @@ export default function CashierDeliveries() {
                   order.delivery_status || "pending"
                 ).toLowerCase();
 
-                const orderStatus = String(
-                  order.status || ""
-                ).toLowerCase();
-
-                const isCancelled = [
-                  "cancelled",
-                  "canceled",
-                ].includes(orderStatus);
-
+                const isCancelled = isCancelledOrder(order);
                 const isSaving = savingOrderId === order.id;
 
                 const selectedStatus =
                   pendingStatuses[order.id] ?? currentStatus;
+
+                const riderForm = riderForms[order.id] || {
+                  delivery_person: String(order.delivery_person || ""),
+                  delivery_phone: String(order.delivery_phone || ""),
+                };
+
+                const riderAssigned =
+                  String(order.delivery_person || "").trim() !== "";
 
                 return (
                   <tr key={order.id}>
@@ -743,10 +930,94 @@ export default function CashierDeliveries() {
                     </td>
 
                     <td style={styles.td}>
-                      {order.delivery_person || "Not assigned"}
+                      <div style={styles.riderForm}>
+                        <label
+                          style={styles.riderLabel}
+                          htmlFor={`rider-name-${order.id}`}
+                        >
+                          Rider name
+                        </label>
 
-                      <div style={{ marginTop: "5px", color: "#6b7280" }}>
-                        {order.delivery_phone || "No phone recorded"}
+                        <input
+                          id={`rider-name-${order.id}`}
+                          type="text"
+                          autoComplete="name"
+                          placeholder="Enter rider name"
+                          value={riderForm.delivery_person}
+                          disabled={isSaving || isCancelled}
+                          maxLength={150}
+                          onChange={(event) =>
+                            handleRiderChange(
+                              order.id,
+                              "delivery_person",
+                              event.target.value
+                            )
+                          }
+                          style={styles.input}
+                        />
+
+                        <label
+                          style={styles.riderLabel}
+                          htmlFor={`rider-phone-${order.id}`}
+                        >
+                          Rider phone
+                        </label>
+
+                        <input
+                          id={`rider-phone-${order.id}`}
+                          type="tel"
+                          autoComplete="tel"
+                          placeholder="e.g. 07XXXXXXXX"
+                          value={riderForm.delivery_phone}
+                          disabled={isSaving || isCancelled}
+                          maxLength={50}
+                          onChange={(event) =>
+                            handleRiderChange(
+                              order.id,
+                              "delivery_phone",
+                              event.target.value
+                            )
+                          }
+                          style={styles.input}
+                        />
+
+                        {riderAssigned && (
+                          <div style={styles.mutedText}>
+                            Currently assigned: {order.delivery_person}
+                            {order.delivery_phone
+                              ? ` · ${order.delivery_phone}`
+                              : ""}
+                          </div>
+                        )}
+
+                        <button
+                          type="button"
+                          disabled={isSaving || isCancelled}
+                          onClick={() => assignRider(order)}
+                          style={{
+                            ...styles.button,
+                            background: "#1d4ed8",
+                            color: "#fff",
+                            opacity:
+                              isSaving || isCancelled ? 0.5 : 1,
+                            cursor:
+                              isSaving || isCancelled
+                                ? "not-allowed"
+                                : "pointer",
+                          }}
+                        >
+                          {isSaving
+                            ? "Saving..."
+                            : riderAssigned
+                            ? "Save rider"
+                            : "Assign rider"}
+                        </button>
+
+                        {isCancelled && (
+                          <small style={{ color: "#b91c1c" }}>
+                            Cannot assign a rider to a cancelled order.
+                          </small>
+                        )}
                       </div>
                     </td>
 
@@ -864,12 +1135,13 @@ export default function CashierDeliveries() {
         style={{
           color: "#6b7280",
           fontSize: "13px",
+          lineHeight: 1.6,
           marginTop: "14px",
         }}
       >
-        Delivery changes are validated by the backend and shared through the
-        database. Payment status is not changed by delivery updates. Assign
-        delivery personnel through the authorized admin workflow.
+        Rider assignments and delivery status changes are saved through the
+        hosted backend. Assigning a rider does not mark an order as paid.
+        Payment status remains controlled by the payment workflow.
       </p>
     </main>
   );

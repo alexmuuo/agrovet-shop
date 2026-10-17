@@ -345,7 +345,6 @@ def add_cashier_stock():
     product_id = data.get("product_id")
     quantity = data.get("quantity")
 
-    # bool is a subclass of int in Python, so reject it explicitly.
     if (
         isinstance(product_id, bool)
         or not isinstance(product_id, int)
@@ -368,7 +367,6 @@ def add_cashier_stock():
             ),
         }), 400
 
-    # Prevent unreasonable quantities and integer overflow.
     if quantity > 1_000_000:
         return jsonify({
             "status": "error",
@@ -412,8 +410,6 @@ def add_cashier_stock():
         }), 400
 
     try:
-        # Reload the cashier from the database rather than
-        # trusting a cashier ID supplied in the request body.
         cashier = db.session.get(
             Cashier,
             g.cashier.id,
@@ -429,8 +425,6 @@ def add_cashier_stock():
                 ),
             }), 403
 
-        # Lock the selected product so concurrent stock changes
-        # cannot overwrite one another.
         product = db.session.execute(
             select(Product)
             .where(Product.id == product_id)
@@ -474,7 +468,6 @@ def add_cashier_stock():
 
         new_stock = previous_stock + quantity
 
-        # Keep the stock quantity within PostgreSQL INTEGER range.
         if new_stock > 2_147_483_647:
             db.session.rollback()
 
@@ -485,8 +478,6 @@ def add_cashier_stock():
                 ),
             }), 400
 
-        # Update the product and create its audit record
-        # within the same database transaction.
         product.stock = new_stock
 
         movement = StockMovement(
@@ -501,9 +492,6 @@ def add_cashier_stock():
         )
 
         db.session.add(movement)
-
-        # Generate database values and surface constraint errors
-        # before constructing the success response.
         db.session.flush()
 
         result = {
@@ -749,8 +737,8 @@ def update_cashier_order_status(order_id):
     Payment status cannot be changed through this endpoint.
 
     Cancelling an eligible unpaid order restores its stock.
-    A cancelled order cannot be reopened.
     A paid order cannot be cancelled.
+    A cancelled order cannot be reopened.
     """
 
     try:
@@ -1032,6 +1020,177 @@ def get_cashier_deliveries():
         return jsonify({
             "status": "error",
             "message": "Unable to load deliveries right now.",
+        }), 500
+
+
+# ============================================================
+# ASSIGN DELIVERY RIDER
+# PUT /api/cashier/orders/<order_id>/delivery/assign
+# CASHIER AUTHENTICATION REQUIRED
+# ============================================================
+
+@cashier_bp.route(
+    "/orders/<int:order_id>/delivery/assign",
+    methods=["PUT"],
+)
+@cashier_required
+def assign_cashier_delivery_person(order_id):
+    """
+    Assign or update the delivery rider for a delivery order.
+
+    Payment status is not modified by this endpoint.
+    """
+
+    try:
+        # Lock the order so concurrent updates cannot overwrite
+        # one another without first acquiring the row lock.
+        order = db.session.execute(
+            select(Order)
+            .where(Order.id == order_id)
+            .with_for_update()
+        ).scalar_one_or_none()
+
+        if order is None:
+            return jsonify({
+                "status": "error",
+                "message": "Order not found.",
+            }), 404
+
+        if normalize_status(order.order_type) != "delivery":
+            return jsonify({
+                "status": "error",
+                "message": "This order is not a delivery order.",
+            }), 400
+
+        if normalize_status(order.status) in {
+            "cancelled",
+            "canceled",
+        }:
+            return jsonify({
+                "status": "error",
+                "message": (
+                    "A delivery rider cannot be assigned "
+                    "to a cancelled order."
+                ),
+            }), 400
+
+        data = request.get_json(silent=True)
+
+        if not isinstance(data, dict):
+            return jsonify({
+                "status": "error",
+                "message": "A valid JSON request body is required.",
+            }), 400
+
+        delivery_person = data.get("delivery_person")
+        delivery_phone = data.get("delivery_phone")
+
+        if (
+            not isinstance(delivery_person, str)
+            or not delivery_person.strip()
+        ):
+            return jsonify({
+                "status": "error",
+                "message": "The delivery person's name is required.",
+            }), 400
+
+        if (
+            not isinstance(delivery_phone, str)
+            or not delivery_phone.strip()
+        ):
+            return jsonify({
+                "status": "error",
+                "message": (
+                    "The delivery person's phone number is required."
+                ),
+            }), 400
+
+        delivery_person = delivery_person.strip()
+        delivery_phone = delivery_phone.strip()
+
+        if len(delivery_person) > 120:
+            return jsonify({
+                "status": "error",
+                "message": "The delivery person's name is too long.",
+            }), 400
+
+        if len(delivery_phone) > 30:
+            return jsonify({
+                "status": "error",
+                "message": "The delivery phone number is too long.",
+            }), 400
+
+        order.delivery_person = delivery_person
+        order.delivery_phone = delivery_phone
+
+        # Automatically mark a previously pending delivery
+        # as assigned. Preserve later delivery statuses.
+        if normalize_status(order.delivery_status) == "pending":
+            order.delivery_status = "assigned"
+
+        # Keep notification creation inside the same transaction
+        # as the rider assignment.
+        if order.customer_id is not None:
+            add_order_notification(
+                order=order,
+                notification_type="delivery",
+                title="Delivery Person Assigned",
+                message=(
+                    f"A delivery person has been assigned "
+                    f"to order {order.order_number}."
+                ),
+            )
+
+        db.session.flush()
+
+        order_data = serialize_cashier_order(order)
+
+        db.session.commit()
+
+        logger.info(
+            "Cashier assigned delivery person to order ID %s.",
+            order_id,
+        )
+
+        return jsonify({
+            "status": "success",
+            "message": (
+                "Delivery person assigned successfully."
+            ),
+            "order": order_data,
+        }), 200
+
+    except IntegrityError:
+        db.session.rollback()
+
+        logger.exception(
+            "Database constraint error while assigning "
+            "delivery person to order ID %s.",
+            order_id,
+        )
+
+        return jsonify({
+            "status": "error",
+            "message": (
+                "The delivery assignment could not be saved."
+            ),
+        }), 409
+
+    except Exception:
+        db.session.rollback()
+
+        logger.exception(
+            "Cashier failed to assign delivery person "
+            "to order ID %s.",
+            order_id,
+        )
+
+        return jsonify({
+            "status": "error",
+            "message": (
+                "Unable to assign the delivery person. "
+                "Please try again."
+            ),
         }), 500
 
 
