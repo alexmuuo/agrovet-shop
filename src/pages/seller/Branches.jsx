@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import api from "../../api/axios";
+import api from "../../api/api";
 
 const styles = {
 page: {
