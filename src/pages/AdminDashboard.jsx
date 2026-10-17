@@ -261,9 +261,7 @@ function AdminDashboard() {
             ADMIN DASHBOARD
           </span>
 
-          <h1 className="fw-bold mt-1 mb-1">
-            Agrovet Dashboard
-          </h1>
+     
 
           <p className="text-secondary mb-0">
             Manage products, inventory, customer orders and cashier
