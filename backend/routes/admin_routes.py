@@ -16,7 +16,8 @@ from models.stock_movement import StockMovement
 from models.branch import Branch
 from models.branch_product_stock import BranchProductStock
 from models.cashier import Cashier
-from models.cashier_sale import CashierSale
+from models.cashier_sale import CashierSale, CashierSaleItem
+from models.cashier_sale_payment import CashierSalePayment
 
 from admin_auth import admin_required
 
@@ -2234,3 +2235,1033 @@ def get_branch_pos_sales(branch_id):
             "status": "error",
             "message": "Unable to retrieve branch POS sales.",
         }), 500
+
+# ============================================================
+# POS REPORTING HELPERS
+#
+# POS sales remain separate from website customer orders.
+# Revenue is included only for confirmed paid sales.
+# Historical buying-price snapshots are used for COGS/profit.
+# ============================================================
+
+POS_SUCCESSFUL_PAYMENT_STATUSES = {
+    "paid",
+    "success",
+    "successful",
+    "completed",
+}
+
+POS_INACTIVE_SALE_STATUSES = {
+    "voided",
+    "void",
+    "cancelled",
+    "canceled",
+}
+
+
+def pos_payment_is_successful(payment):
+    """Return True only for a confirmed successful payment."""
+
+    if payment is None:
+        return False
+
+    return normalize_status(
+        getattr(payment, "status", None)
+    ) in POS_SUCCESSFUL_PAYMENT_STATUSES
+
+
+def pos_sale_is_paid(sale):
+    """
+    Determine whether a POS sale has confirmed payment.
+
+    A sale is paid if its payment_status is confirmed or at
+    least one associated payment record has a successful status.
+
+    Pending and failed payment records do not qualify.
+    """
+
+    if sale is None:
+        return False
+
+    if normalize_status(
+        getattr(sale, "status", None)
+    ) in POS_INACTIVE_SALE_STATUSES:
+        return False
+
+    if normalize_status(
+        getattr(sale, "payment_status", None)
+    ) in POS_SUCCESSFUL_PAYMENT_STATUSES:
+        return True
+
+    payments = getattr(sale, "payments", None) or []
+
+    return any(
+        pos_payment_is_successful(payment)
+        for payment in payments
+    )
+
+
+def get_filtered_pos_sales(start_date=None, end_date=None):
+    """Return POS sales in the requested date range."""
+
+    query = CashierSale.query
+
+    if start_date:
+        query = query.filter(
+            CashierSale.created_at >= start_date
+        )
+
+    if end_date:
+        query = query.filter(
+            CashierSale.created_at < end_date
+        )
+
+    return query
+
+
+def get_confirmed_pos_sales(start_date=None, end_date=None):
+    """
+    Return paid POS sales, excluding voided and cancelled sales.
+
+    Payment records are retained for reconciliation, but they
+    do not make an inactive sale count as active revenue.
+    """
+
+    sales = get_filtered_pos_sales(
+        start_date,
+        end_date
+    ).order_by(
+        CashierSale.created_at.asc(),
+        CashierSale.id.asc()
+    ).all()
+
+    return [
+        sale
+        for sale in sales
+        if pos_sale_is_paid(sale)
+    ]
+
+
+def decimal_value(value, default="0.00"):
+    """Convert a database value into a finite Decimal."""
+
+    try:
+        result = Decimal(
+            str(value if value is not None else default)
+        )
+
+        if not result.is_finite():
+            raise InvalidOperation
+
+        return result
+
+    except (InvalidOperation, ValueError, TypeError):
+        return Decimal(default)
+
+
+def get_pos_item_financials(item):
+    """
+    Calculate one POS item's financial values.
+
+    Returns None for invalid quantity or selling price.
+    Missing buying price remains unknown rather than zero.
+    """
+
+    quantity = getattr(item, "quantity", None)
+
+    if (
+        isinstance(quantity, bool)
+        or not isinstance(quantity, int)
+        or quantity <= 0
+    ):
+        return None
+
+    selling_price = decimal_value(
+        getattr(item, "price", None),
+        default="-1.00"
+    )
+
+    if selling_price < Decimal("0.00"):
+        return None
+
+    revenue = selling_price * quantity
+
+    raw_buying_price = getattr(
+        item,
+        "buying_price",
+        None
+    )
+
+    if raw_buying_price is None:
+        return {
+            "quantity": quantity,
+            "selling_price": selling_price,
+            "revenue": revenue,
+            "buying_price": None,
+            "cost": None,
+            "profit": None,
+        }
+
+    buying_price = decimal_value(
+        raw_buying_price,
+        default="-1.00"
+    )
+
+    if buying_price < Decimal("0.00"):
+        return {
+            "quantity": quantity,
+            "selling_price": selling_price,
+            "revenue": revenue,
+            "buying_price": None,
+            "cost": None,
+            "profit": None,
+        }
+
+    cost = buying_price * quantity
+
+    return {
+        "quantity": quantity,
+        "selling_price": selling_price,
+        "revenue": revenue,
+        "buying_price": buying_price,
+        "cost": cost,
+        "profit": revenue - cost,
+    }
+
+
+def get_pos_report_items(sales):
+    """
+    Retrieve items belonging to the supplied POS sales.
+
+    This queries cashier_sale_items only. Website OrderItem
+    records are never included.
+    """
+
+    sale_ids = [
+        sale.id
+        for sale in sales
+    ]
+
+    if not sale_ids:
+        return []
+
+    return CashierSaleItem.query.filter(
+        CashierSaleItem.sale_id.in_(sale_ids)
+    ).order_by(
+        CashierSaleItem.id.asc()
+    ).all()
+
+
+def get_pos_sale_reference(sale):
+    """Serialize a POS sale using sale_number, not order_number."""
+
+    return {
+        "id": sale.id,
+        "sale_id": sale.id,
+        "sale_number": sale.sale_number,
+        "branch_id": sale.branch_id,
+        "branch_name": (
+            sale.branch.name
+            if sale.branch
+            else "Unknown branch"
+        ),
+        "cashier_id": sale.cashier_id,
+        "cashier_name": (
+            sale.cashier.full_name
+            if sale.cashier
+            else "Unknown cashier"
+        ),
+        "total": money(sale.total),
+        "payment_method": sale.payment_method,
+        "payment_status": sale.payment_status,
+        "status": sale.status,
+        "created_at": (
+            sale.created_at.isoformat()
+            if sale.created_at
+            else None
+        ),
+    }
+
+
+def get_pos_financial_summary(sales):
+    """
+    Calculate POS revenue and profitability.
+
+    Revenue:
+        Sale totals for confirmed paid, active POS sales.
+
+    Cost and profit:
+        Calculated only from items with valid historical
+        buying-price snapshots.
+
+    Missing costs are explicitly flagged.
+    """
+
+    sale_ids = {
+        sale.id
+        for sale in sales
+    }
+
+    summary = {
+        "total_sales": len(sales),
+        "sales_revenue": Decimal("0.00"),
+        "cost_of_goods_sold": Decimal("0.00"),
+        "gross_profit": Decimal("0.00"),
+        "known_cost_revenue": Decimal("0.00"),
+        "unknown_cost_sales_value": Decimal("0.00"),
+        "quantity_sold": 0,
+        "known_cost_item_count": 0,
+        "unknown_cost_item_count": 0,
+        "known_cost_quantity": 0,
+        "unknown_cost_quantity": 0,
+        "profit_is_complete": True,
+    }
+
+    for sale in sales:
+        summary["sales_revenue"] += decimal_value(
+            sale.total
+        )
+
+    items = get_pos_report_items(sales)
+
+    for item in items:
+        if item.sale_id not in sale_ids:
+            continue
+
+        financials = get_pos_item_financials(item)
+
+        if financials is None:
+            logger.warning(
+                "Skipping invalid POS sale item ID %s.",
+                item.id
+            )
+            continue
+
+        quantity = financials["quantity"]
+        revenue = financials["revenue"]
+
+        summary["quantity_sold"] += quantity
+
+        if financials["buying_price"] is None:
+            summary["unknown_cost_item_count"] += 1
+            summary["unknown_cost_quantity"] += quantity
+            summary["unknown_cost_sales_value"] += revenue
+            summary["profit_is_complete"] = False
+            continue
+
+        summary["known_cost_item_count"] += 1
+        summary["known_cost_quantity"] += quantity
+
+        summary["known_cost_revenue"] += revenue
+        summary["cost_of_goods_sold"] += financials["cost"]
+        summary["gross_profit"] += financials["profit"]
+
+    summary["profit_margin"] = calculate_margin(
+        summary["gross_profit"],
+        summary["known_cost_revenue"]
+    )
+
+    summary["revenue"] = summary["sales_revenue"]
+    summary["total_revenue"] = summary["sales_revenue"]
+    summary["total_cost"] = summary["cost_of_goods_sold"]
+    summary["total_profit"] = summary["gross_profit"]
+
+    return summary
+
+
+def serialize_pos_financial_summary(summary):
+    """Convert financial summary values into JSON-safe numbers."""
+
+    result = {}
+
+    for key, value in summary.items():
+        if isinstance(value, Decimal):
+            result[key] = money(value)
+        else:
+            result[key] = value
+
+    return result
+
+
+# ============================================================
+# POS REPORT 1: OVERVIEW
+#
+# GET /api/admin/reports/pos/overview
+# ============================================================
+
+@admin_bp.route(
+    "/api/admin/reports/pos/overview",
+    methods=["GET"]
+)
+@admin_required
+def get_pos_reports_overview():
+    try:
+        start_date, end_date = get_date_range()
+
+        all_sales = get_filtered_pos_sales(
+            start_date,
+            end_date
+        ).all()
+
+        confirmed_sales = [
+            sale
+            for sale in all_sales
+            if pos_sale_is_paid(sale)
+        ]
+
+        active_sales = [
+            sale
+            for sale in all_sales
+            if normalize_status(sale.status)
+            not in POS_INACTIVE_SALE_STATUSES
+        ]
+
+        pending_payment_count = sum(
+            1
+            for sale in active_sales
+            if not pos_sale_is_paid(sale)
+        )
+
+        summary = get_pos_financial_summary(
+            confirmed_sales
+        )
+
+        return jsonify({
+            "status": "success",
+            "filters": report_date_filters(
+                start_date,
+                end_date
+            ),
+            "overview": {
+                **serialize_pos_financial_summary(summary),
+                "total_transactions": len(all_sales),
+                "paid_sales": len(confirmed_sales),
+                "pending_payment_count": pending_payment_count,
+                "voided_sales": sum(
+                    1
+                    for sale in all_sales
+                    if normalize_status(sale.status)
+                    in POS_INACTIVE_SALE_STATUSES
+                ),
+            },
+            "note": (
+                "POS reports use cashier POS records only. "
+                "Confirmed revenue excludes pending and failed "
+                "payments and excludes voided or cancelled sales. "
+                "Profit uses recorded historical buying prices. "
+                "Operating expenses and taxes are not deducted."
+            ),
+        }), 200
+
+    except ValueError as error:
+        return jsonify({
+            "status": "error",
+            "message": str(error),
+        }), 400
+
+    except Exception:
+        db.session.rollback()
+
+        logger.exception(
+            "Failed to generate POS overview report."
+        )
+
+        return jsonify({
+            "status": "error",
+            "message": "Unable to generate POS overview report.",
+        }), 500
+
+
+# ============================================================
+# POS REPORT 2: SALES BY DAY AND TRANSACTIONS
+#
+# GET /api/admin/reports/pos/sales
+# ============================================================
+
+@admin_bp.route(
+    "/api/admin/reports/pos/sales",
+    methods=["GET"]
+)
+@admin_required
+def get_pos_sales_report():
+    try:
+        start_date, end_date = get_date_range()
+
+        all_sales = get_filtered_pos_sales(
+            start_date,
+            end_date
+        ).order_by(
+            CashierSale.created_at.asc(),
+            CashierSale.id.asc()
+        ).all()
+
+        confirmed_sales = [
+            sale
+            for sale in all_sales
+            if pos_sale_is_paid(sale)
+        ]
+
+        daily_sales = {}
+
+        for sale in confirmed_sales:
+            if not sale.created_at:
+                continue
+
+            day = sale.created_at.date().isoformat()
+
+            if day not in daily_sales:
+                daily_sales[day] = {
+                    "date": day,
+                    "sales": 0,
+                    "transactions": 0,
+                    "sales_revenue": Decimal("0.00"),
+                    "cost_of_goods_sold": Decimal("0.00"),
+                    "gross_profit": Decimal("0.00"),
+                }
+
+            daily_sales[day]["sales"] += 1
+            daily_sales[day]["transactions"] += 1
+
+            daily_sales[day]["sales_revenue"] += (
+                decimal_value(sale.total)
+            )
+
+        items = get_pos_report_items(
+            confirmed_sales
+        )
+
+        sales_by_id = {
+            sale.id: sale
+            for sale in confirmed_sales
+        }
+
+        for item in items:
+            financials = get_pos_item_financials(item)
+
+            if financials is None:
+                continue
+
+            sale = sales_by_id.get(item.sale_id)
+
+            if sale is None or not sale.created_at:
+                continue
+
+            day = sale.created_at.date().isoformat()
+
+            if financials["buying_price"] is None:
+                continue
+
+            daily_sales[day]["cost_of_goods_sold"] += (
+                financials["cost"]
+            )
+
+            daily_sales[day]["gross_profit"] += (
+                financials["profit"]
+            )
+
+        results = []
+
+        for day, values in sorted(
+            daily_sales.items()
+        ):
+            known_cost_revenue = Decimal("0.00")
+
+            for item in items:
+                financials = get_pos_item_financials(item)
+
+                if (
+                    financials is None
+                    or financials["buying_price"] is None
+                ):
+                    continue
+
+                sale = sales_by_id.get(item.sale_id)
+
+                if (
+                    sale is not None
+                    and sale.created_at
+                    and sale.created_at.date().isoformat() == day
+                ):
+                    known_cost_revenue += financials["revenue"]
+
+            results.append({
+                "date": values["date"],
+                "sales": values["sales"],
+                "transactions": values["transactions"],
+                "sales_revenue": money(
+                    values["sales_revenue"]
+                ),
+                "revenue": money(
+                    values["sales_revenue"]
+                ),
+                "total_sales": money(
+                    values["sales_revenue"]
+                ),
+                "cost_of_goods_sold": money(
+                    values["cost_of_goods_sold"]
+                ),
+                "gross_profit": money(
+                    values["gross_profit"]
+                ),
+                "profit_margin": money(
+                    calculate_margin(
+                        values["gross_profit"],
+                        known_cost_revenue
+                    )
+                ),
+            })
+
+        transaction_records = [
+            get_pos_sale_reference(sale)
+            for sale in reversed(confirmed_sales)
+        ]
+
+        return jsonify({
+            "status": "success",
+            "filters": report_date_filters(
+                start_date,
+                end_date
+            ),
+            "sales": results,
+            "daily_sales": results,
+            "transactions": transaction_records,
+            "total_transactions": len(confirmed_sales),
+            "total_sales_revenue": money(
+                sum(
+                    (
+                        decimal_value(sale.total)
+                        for sale in confirmed_sales
+                    ),
+                    Decimal("0.00")
+                )
+            ),
+            "note": (
+                "Transactions use sale_number. Only confirmed "
+                "paid, active POS sales are included in these "
+                "revenue figures."
+            ),
+        }), 200
+
+    except ValueError as error:
+        return jsonify({
+            "status": "error",
+            "message": str(error),
+        }), 400
+
+    except Exception:
+        db.session.rollback()
+
+        logger.exception(
+            "Failed to generate POS sales report."
+        )
+
+        return jsonify({
+            "status": "error",
+            "message": "Unable to generate POS sales report.",
+        }), 500
+
+
+# ============================================================
+# POS REPORT 3: PRODUCT PERFORMANCE AND PROFITABILITY
+#
+# GET /api/admin/reports/pos/products
+# ============================================================
+
+@admin_bp.route(
+    "/api/admin/reports/pos/products",
+    methods=["GET"]
+)
+@admin_required
+def get_pos_product_report():
+    try:
+        start_date, end_date = get_date_range()
+
+        sales = get_confirmed_pos_sales(
+            start_date,
+            end_date
+        )
+
+        sale_ids = {
+            sale.id
+            for sale in sales
+        }
+
+        products = {}
+
+        for item in get_pos_report_items(sales):
+            if item.sale_id not in sale_ids:
+                continue
+
+            financials = get_pos_item_financials(item)
+
+            if financials is None:
+                continue
+
+            product_id = item.product_id
+
+            if product_id not in products:
+                product = db.session.get(
+                    Product,
+                    product_id
+                )
+
+                products[product_id] = {
+                    "product_id": product_id,
+                    "product_name": (
+                        product.name
+                        if product
+                        else "Deleted product"
+                    ),
+                    "quantity_sold": 0,
+                    "sales_revenue": Decimal("0.00"),
+                    "known_cost_revenue": Decimal("0.00"),
+                    "cost_of_goods_sold": Decimal("0.00"),
+                    "gross_profit": Decimal("0.00"),
+                    "known_cost_quantity": 0,
+                    "unknown_cost_quantity": 0,
+                    "unknown_cost_sales_value": Decimal("0.00"),
+                }
+
+            row = products[product_id]
+
+            row["quantity_sold"] += financials["quantity"]
+            row["sales_revenue"] += financials["revenue"]
+
+            if financials["buying_price"] is None:
+                row["unknown_cost_quantity"] += (
+                    financials["quantity"]
+                )
+
+                row["unknown_cost_sales_value"] += (
+                    financials["revenue"]
+                )
+
+                continue
+
+            row["known_cost_quantity"] += (
+                financials["quantity"]
+            )
+
+            row["known_cost_revenue"] += (
+                financials["revenue"]
+            )
+
+            row["cost_of_goods_sold"] += (
+                financials["cost"]
+            )
+
+            row["gross_profit"] += (
+                financials["profit"]
+            )
+
+        results = []
+
+        for row in products.values():
+            cost_complete = (
+                row["unknown_cost_quantity"] == 0
+            )
+
+            results.append({
+                "product_id": row["product_id"],
+                "product_name": row["product_name"],
+                "quantity_sold": row["quantity_sold"],
+                "sales_revenue": money(
+                    row["sales_revenue"]
+                ),
+                "item_value": money(
+                    row["sales_revenue"]
+                ),
+                "cost_of_goods_sold": money(
+                    row["cost_of_goods_sold"]
+                ),
+                "gross_profit": (
+                    money(row["gross_profit"])
+                    if row["known_cost_quantity"] > 0
+                    else None
+                ),
+                "profit_margin": (
+                    money(
+                        calculate_margin(
+                            row["gross_profit"],
+                            row["known_cost_revenue"]
+                        )
+                    )
+                    if row["known_cost_quantity"] > 0
+                    else None
+                ),
+                "known_cost_revenue": money(
+                    row["known_cost_revenue"]
+                ),
+                "unknown_cost_sales_value": money(
+                    row["unknown_cost_sales_value"]
+                ),
+                "known_cost_quantity": row[
+                    "known_cost_quantity"
+                ],
+                "unknown_cost_quantity": row[
+                    "unknown_cost_quantity"
+                ],
+                "cost_known": cost_complete,
+                "unknown_cost": not cost_complete,
+            })
+
+        results.sort(
+            key=lambda row: row["sales_revenue"],
+            reverse=True
+        )
+
+        summary = get_pos_financial_summary(sales)
+
+        return jsonify({
+            "status": "success",
+            "filters": report_date_filters(
+                start_date,
+                end_date
+            ),
+            "products": results,
+            "product_profit": results,
+            "total_products_sold": len(results),
+            "total_quantity_sold": sum(
+                row["quantity_sold"]
+                for row in results
+            ),
+            "total_sales_revenue": money(
+                sum(
+                    (
+                        Decimal(str(row["sales_revenue"]))
+                        for row in results
+                    ),
+                    Decimal("0.00")
+                )
+            ),
+            "profit_summary": serialize_pos_financial_summary(
+                summary
+            ),
+        }), 200
+
+    except ValueError as error:
+        return jsonify({
+            "status": "error",
+            "message": str(error),
+        }), 400
+
+    except Exception:
+        db.session.rollback()
+
+        logger.exception(
+            "Failed to generate POS product report."
+        )
+
+        return jsonify({
+            "status": "error",
+            "message": "Unable to generate POS product report.",
+        }), 500
+
+
+# ============================================================
+# POS REPORT 4: BRANCH PERFORMANCE AND PROFITABILITY
+#
+# GET /api/admin/reports/pos/branches
+# ============================================================
+
+@admin_bp.route(
+    "/api/admin/reports/pos/branches",
+    methods=["GET"]
+)
+@admin_required
+def get_pos_branch_report():
+    try:
+        start_date, end_date = get_date_range()
+
+        sales = get_confirmed_pos_sales(
+            start_date,
+            end_date
+        )
+
+        branch_totals = {}
+
+        for sale in sales:
+            branch_id = sale.branch_id
+
+            if branch_id not in branch_totals:
+                branch = db.session.get(
+                    Branch,
+                    branch_id
+                )
+
+                branch_totals[branch_id] = {
+                    "branch_id": branch_id,
+                    "branch_name": (
+                        branch.name
+                        if branch
+                        else "Unknown branch"
+                    ),
+                    "sales_count": 0,
+                    "paid_sales": 0,
+                    "sales_revenue": Decimal("0.00"),
+                    "cost_of_goods_sold": Decimal("0.00"),
+                    "gross_profit": Decimal("0.00"),
+                    "known_cost_revenue": Decimal("0.00"),
+                    "unknown_cost_sales_value": Decimal("0.00"),
+                    "known_cost_item_count": 0,
+                    "unknown_cost_item_count": 0,
+                }
+
+            row = branch_totals[branch_id]
+
+            row["sales_count"] += 1
+            row["paid_sales"] += 1
+
+            row["sales_revenue"] += decimal_value(
+                sale.total
+            )
+
+        sales_by_id = {
+            sale.id: sale
+            for sale in sales
+        }
+
+        for item in get_pos_report_items(sales):
+            sale = sales_by_id.get(item.sale_id)
+
+            if sale is None:
+                continue
+
+            financials = get_pos_item_financials(item)
+
+            if financials is None:
+                continue
+
+            row = branch_totals.get(sale.branch_id)
+
+            if row is None:
+                continue
+
+            if financials["buying_price"] is None:
+                row["unknown_cost_item_count"] += 1
+
+                row["unknown_cost_sales_value"] += (
+                    financials["revenue"]
+                )
+
+                continue
+
+            row["known_cost_item_count"] += 1
+
+            row["known_cost_revenue"] += (
+                financials["revenue"]
+            )
+
+            row["cost_of_goods_sold"] += (
+                financials["cost"]
+            )
+
+            row["gross_profit"] += (
+                financials["profit"]
+            )
+
+        results = []
+
+        for row in branch_totals.values():
+            cost_complete = (
+                row["unknown_cost_item_count"] == 0
+            )
+
+            results.append({
+                "branch_id": row["branch_id"],
+                "branch_name": row["branch_name"],
+                "sales_count": row["sales_count"],
+                "total_sales": row["sales_count"],
+                "paid_sales": row["paid_sales"],
+                "sales_revenue": money(
+                    row["sales_revenue"]
+                ),
+                "revenue": money(
+                    row["sales_revenue"]
+                ),
+                "cost_of_goods_sold": money(
+                    row["cost_of_goods_sold"]
+                ),
+                "gross_profit": (
+                    money(row["gross_profit"])
+                    if row["known_cost_item_count"] > 0
+                    else None
+                ),
+                "profit_margin": (
+                    money(
+                        calculate_margin(
+                            row["gross_profit"],
+                            row["known_cost_revenue"]
+                        )
+                    )
+                    if row["known_cost_revenue"] > 0
+                    else None
+                ),
+                "known_cost_revenue": money(
+                    row["known_cost_revenue"]
+                ),
+                "unknown_cost_sales_value": money(
+                    row["unknown_cost_sales_value"]
+                ),
+                "known_cost_item_count": row[
+                    "known_cost_item_count"
+                ],
+                "unknown_cost_item_count": row[
+                    "unknown_cost_item_count"
+                ],
+                "cost_known": cost_complete,
+                "unknown_cost": not cost_complete,
+            })
+
+        results.sort(
+            key=lambda row: row["sales_revenue"],
+            reverse=True
+        )
+
+        return jsonify({
+            "status": "success",
+            "filters": report_date_filters(
+                start_date,
+                end_date
+            ),
+            "branches": results,
+            "branch_reports": results,
+            "total_branches": len(results),
+            "total_paid_sales": sum(
+                row["paid_sales"]
+                for row in results
+            ),
+            "total_sales_revenue": money(
+                sum(
+                    (
+                        Decimal(str(row["sales_revenue"]))
+                        for row in results
+                    ),
+                    Decimal("0.00")
+                )
+            ),
+            "note": (
+                "Branch profitability includes confirmed paid "
+                "POS sales only. It uses historical item costs "
+                "and excludes website orders. Profit is incomplete "
+                "where historical buying prices are missing."
+            ),
+        }), 200
+
+    except ValueError as error:
+        return jsonify({
+            "status": "error",
+            "message": str(error),
+        }), 400
+
+    except Exception:
+        db.session.rollback()
+
+        logger.exception(
+            "Failed to generate POS branch report."
+        )
+
+        return jsonify({
+            "status": "error",
+            "message": "Unable to generate POS branch report.",
+        }), 500    
