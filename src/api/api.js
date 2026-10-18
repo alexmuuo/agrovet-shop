@@ -5,8 +5,8 @@ import axios from "axios";
 // ============================================================
 
 const api = axios.create({
-  baseURL: "https://agrovet-api-a00w.onrender.com/api",
-  timeout: 30000,
+baseURL: "https://agrovet-api-a00w.onrender.com/api",
+timeout: 30000,
 });
 
 // ============================================================
@@ -15,104 +15,116 @@ const api = axios.create({
 // ============================================================
 
 api.interceptors.request.use(
-  (config) => {
-    const url = config.url || "";
-    const method = (config.method || "get").toLowerCase();
+(config) => {
+const url = config.url || "";
+const method = (config.method || "get").toLowerCase();
 
-    config.headers = config.headers || {};
 
-    // Remove query parameters when checking endpoint paths.
-    const cleanUrl = url.split("?")[0];
+config.headers = config.headers || {};
 
-    // ========================================================
-    // ADMIN AUTHENTICATION
-    // ========================================================
+// Remove query parameters when checking endpoint paths.
+const cleanUrl = url.split("?")[0];
 
-    const isAdminRoute = cleanUrl.startsWith("/admin/");
+// ========================================================
+// ADMIN AUTHENTICATION
+// ========================================================
 
-    // Product creation, editing, and deletion require admin auth.
-    const isProductMutation =
-      /^\/products(?:\/|$)/.test(cleanUrl) &&
-      ["post", "put", "patch", "delete"].includes(method);
+const isAdminRoute = cleanUrl.startsWith("/admin/");
 
-    // Creating a cashier requires admin authentication.
-    const isCashierCreation =
-      cleanUrl === "/cashier/create" && method === "post";
+// Product creation, editing, and deletion require admin auth.
+const isProductMutation =
+  /^\/products(?:\/|$)/.test(cleanUrl) &&
+  ["post", "put", "patch", "delete"].includes(method);
 
-    if (isAdminRoute || isProductMutation || isCashierCreation) {
-      const adminToken = localStorage.getItem("adminToken");
+// Creating a cashier requires admin authentication.
+const isCashierCreation =
+  cleanUrl === "/cashier/create" && method === "post";
 
-      if (adminToken) {
-        config.headers.Authorization = `Bearer ${adminToken}`;
-      }
-    }
+if (isAdminRoute || isProductMutation || isCashierCreation) {
+  const adminToken = localStorage.getItem("adminToken");
 
-    // ========================================================
-    // CASHIER AUTHENTICATION
-    // ========================================================
+  if (adminToken) {
+    config.headers.Authorization = `Bearer ${adminToken}`;
+  }
+}
 
-    // Cashier login is public; do not attach a cashier token to it.
-    const isCashierProtectedEndpoint =
-      cleanUrl.startsWith("/cashier/") &&
-      cleanUrl !== "/cashier/login" &&
-      !isCashierCreation;
+// ========================================================
+// CASHIER AUTHENTICATION
+// ========================================================
 
-    if (isCashierProtectedEndpoint) {
-      const cashierToken = localStorage.getItem("cashierToken");
+// Cashier login is public.
+// Cashier stock, sales, deliveries, and payment endpoints
+// require cashier authentication.
 
-      if (cashierToken) {
-        config.headers.Authorization = `Bearer ${cashierToken}`;
-      }
-    }
+const isCashierLogin =
+  cleanUrl === "/cashier/login";
 
-    // ========================================================
-    // CUSTOMER AUTHENTICATION
-    // ========================================================
+const isCashierProtectedEndpoint =
+  (
+    cleanUrl.startsWith("/cashier/") ||
+    cleanUrl === "/payments/cashier-stk-push"
+  ) &&
+  !isCashierLogin &&
+  !isCashierCreation;
 
-    const customerProtectedEndpoints = [
-      "/notifications/customer/",
-      "/notifications/",
-      "/messages/customer/",
-      "/messages/unread-count",
-      "/messages",
-    ];
+if (isCashierProtectedEndpoint) {
+  const cashierToken = localStorage.getItem("cashierToken");
 
-    const isCustomerProtectedEndpoint =
-      customerProtectedEndpoints.some((endpoint) =>
-        cleanUrl.startsWith(endpoint)
-      );
+  if (cashierToken) {
+    config.headers.Authorization = `Bearer ${cashierToken}`;
+  }
+}
 
-    // Never attach a customer token to admin or cashier requests.
-    if (
-      isCustomerProtectedEndpoint &&
-      !isAdminRoute &&
-      !isProductMutation &&
-      !isCashierProtectedEndpoint &&
-      !isCashierCreation
-    ) {
-      const customerToken = localStorage.getItem("customerToken");
+// ========================================================
+// CUSTOMER AUTHENTICATION
+// ========================================================
 
-      if (customerToken) {
-        config.headers.Authorization = `Bearer ${customerToken}`;
-      }
-    }
+const customerProtectedEndpoints = [
+  "/notifications/customer/",
+  "/notifications/",
+  "/messages/customer/",
+  "/messages/unread-count",
+  "/messages",
+];
 
-    // ========================================================
-    // FORM DATA / IMAGE UPLOAD SUPPORT
-    // ========================================================
+const isCustomerProtectedEndpoint =
+  customerProtectedEndpoints.some((endpoint) =>
+    cleanUrl.startsWith(endpoint)
+  );
 
-    // Allow the browser to set the multipart boundary automatically.
-    if (
-      typeof FormData !== "undefined" &&
-      config.data instanceof FormData
-    ) {
-      delete config.headers["Content-Type"];
-      delete config.headers["content-type"];
-    }
+// Never attach a customer token to admin or cashier requests.
+if (
+  isCustomerProtectedEndpoint &&
+  !isAdminRoute &&
+  !isProductMutation &&
+  !isCashierProtectedEndpoint &&
+  !isCashierCreation
+) {
+  const customerToken = localStorage.getItem("customerToken");
 
-    return config;
-  },
-  (error) => Promise.reject(error)
+  if (customerToken) {
+    config.headers.Authorization = `Bearer ${customerToken}`;
+  }
+}
+
+// ========================================================
+// FORM DATA / IMAGE UPLOAD SUPPORT
+// ========================================================
+
+// Allow the browser to set the multipart boundary automatically.
+if (
+  typeof FormData !== "undefined" &&
+  config.data instanceof FormData
+) {
+  delete config.headers["Content-Type"];
+  delete config.headers["content-type"];
+}
+
+return config;
+
+
+},
+(error) => Promise.reject(error)
 );
 
 export default api;
