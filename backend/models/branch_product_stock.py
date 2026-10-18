@@ -1,4 +1,5 @@
 from datetime import datetime
+from decimal import Decimal
 
 from extensions import db
 
@@ -24,9 +25,9 @@ class BranchProductStock(db.Model):
     )
 
     quantity = db.Column(
-        db.Integer,
+        db.Numeric(12, 3),
         nullable=False,
-        default=0
+        default=Decimal("0.000")
     )
 
     updated_at = db.Column(
@@ -67,10 +68,15 @@ class BranchProductStock(db.Model):
                 if self.product
                 else None
             ),
-            "quantity": self.quantity,
+            "quantity": (
+                float(self.quantity)
+                if self.quantity is not None
+                else 0.0
+            ),
             "updated_at": (
                 self.updated_at.isoformat()
                 if self.updated_at
                 else None
             )
         }
+

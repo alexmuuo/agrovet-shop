@@ -17,7 +17,7 @@ function Products() {
 
   const fileInputRef = useRef(null);
 
-  const [formData, setFormData] = useState({
+  const emptyForm = {
     name: "",
     category: "",
     description: "",
@@ -28,7 +28,12 @@ function Products() {
     branch_id: "",
     initial_branch_stock: "",
     image: "",
-  });
+    allow_portion_sales: false,
+    portions_per_unit: "",
+    portion_price: "",
+  };
+
+  const [formData, setFormData] = useState(emptyForm);
 
   const toInputValue = (value) => {
     if (value === null || value === undefined) {
@@ -48,6 +53,19 @@ function Products() {
     return amount.toLocaleString("en-KE", {
       minimumFractionDigits: 2,
       maximumFractionDigits: 2,
+    });
+  };
+
+  const formatStock = (value) => {
+    const amount = Number(value);
+
+    if (!Number.isFinite(amount)) {
+      return "0.000";
+    }
+
+    return amount.toLocaleString("en-KE", {
+      minimumFractionDigits: 0,
+      maximumFractionDigits: 3,
     });
   };
 
@@ -145,11 +163,11 @@ function Products() {
   }, [imagePreview]);
 
   const handleChange = (event) => {
-    const { name, value } = event.target;
+    const { name, value, type, checked } = event.target;
 
     setFormData((previous) => ({
       ...previous,
-      [name]: value,
+      [name]: type === "checkbox" ? checked : value,
     }));
 
     if (name === "image" && !selectedImage) {
@@ -198,17 +216,9 @@ function Products() {
 
   const resetForm = () => {
     setFormData({
-      name: "",
-      category: "",
-      description: "",
-      buying_price: "",
-      price: "",
-      unit: "",
-      stock: "",
+      ...emptyForm,
       branch_id:
         branches.length === 1 ? String(branches[0].id) : "",
-      initial_branch_stock: "",
-      image: "",
     });
 
     setSelectedImage(null);
@@ -267,17 +277,24 @@ function Products() {
     if (
       priceText === "" ||
       !Number.isFinite(sellingPrice) ||
-      sellingPrice < 0
+      sellingPrice < 0 ||
+      !Number.isFinite(sellingPrice * 100) ||
+      Math.abs(sellingPrice * 100 - Math.round(sellingPrice * 100)) > 0.000001
     ) {
-      alert("Please enter a valid, non-negative selling price.");
+      alert("Please enter a valid selling price with up to two decimal places.");
       return;
     }
 
     if (
       buyingPrice !== null &&
-      (!Number.isFinite(buyingPrice) || buyingPrice < 0)
+      (
+        !Number.isFinite(buyingPrice) ||
+        buyingPrice < 0 ||
+        !Number.isFinite(buyingPrice * 100) ||
+        Math.abs(buyingPrice * 100 - Math.round(buyingPrice * 100)) > 0.000001
+      )
     ) {
-      alert("Please enter a valid, non-negative buying price.");
+      alert("Please enter a valid buying price with up to two decimal places.");
       return;
     }
 
@@ -286,13 +303,13 @@ function Products() {
       return;
     }
 
-    if (
-      stockText === "" ||
-      !Number.isFinite(stock) ||
-      stock < 0 ||
-      !Number.isInteger(stock)
-    ) {
-      alert("General stock must be a non-negative whole number.");
+    const validStock = (value) =>
+      Number.isFinite(value) &&
+      value >= 0 &&
+      Math.abs(value * 1000 - Math.round(value * 1000)) < 0.000001;
+
+    if (stockText === "" || !validStock(stock)) {
+      alert("General stock must be non-negative and have at most three decimal places.");
       return;
     }
 
@@ -329,13 +346,44 @@ function Products() {
 
       if (
         branchStockText === "" ||
-        !Number.isFinite(initialBranchStock) ||
-        initialBranchStock < 0 ||
-        !Number.isInteger(initialBranchStock)
+        !validStock(initialBranchStock)
       ) {
-        alert(
-          "Initial branch stock must be a non-negative whole number."
-        );
+        alert("Initial branch stock must be non-negative and have at most three decimal places.");
+        return;
+      }
+    }
+
+    let portionsPerUnit = null;
+    let portionPrice = null;
+
+    if (formData.allow_portion_sales) {
+      const portionsText = toInputValue(
+        formData.portions_per_unit
+      ).trim();
+
+      const portionPriceText = toInputValue(
+        formData.portion_price
+      ).trim();
+
+      portionsPerUnit = Number(portionsText);
+      portionPrice = Number(portionPriceText);
+
+      if (
+        portionsText === "" ||
+        !Number.isInteger(portionsPerUnit) ||
+        portionsPerUnit <= 0
+      ) {
+        alert("Enter a positive whole number for portions per stock unit.");
+        return;
+      }
+
+      if (
+        portionPriceText === "" ||
+        !Number.isFinite(portionPrice) ||
+        portionPrice < 0 ||
+        Math.abs(portionPrice * 100 - Math.round(portionPrice * 100)) > 0.000001
+      ) {
+        alert("Enter a valid portion price with up to two decimal places.");
         return;
       }
     }
@@ -348,17 +396,20 @@ function Products() {
       productData.append("name", name);
       productData.append("category", category);
       productData.append("description", description);
+      productData.append("buying_price", buyingPrice === null ? "" : String(buyingPrice));
       productData.append("price", String(sellingPrice));
       productData.append("unit", unit);
       productData.append("stock", String(stock));
+      productData.append("allow_portion_sales", String(formData.allow_portion_sales));
       productData.append(
-        "image",
-        toInputValue(formData.image).trim()
+        "portions_per_unit",
+        portionsPerUnit === null ? "" : String(portionsPerUnit)
       );
-
-      if (buyingPrice !== null) {
-        productData.append("buying_price", String(buyingPrice));
-      }
+      productData.append(
+        "portion_price",
+        portionPrice === null ? "" : String(portionPrice)
+      );
+      productData.append("image", toInputValue(formData.image).trim());
 
       if (selectedImage) {
         productData.append("image_file", selectedImage);
@@ -380,9 +431,7 @@ function Products() {
 
         await api.post("/products", productData);
 
-        alert(
-          "Product and initial branch stock added successfully."
-        );
+        alert("Product and initial branch stock added successfully.");
       }
 
       resetForm();
@@ -419,6 +468,9 @@ function Products() {
       branch_id: "",
       initial_branch_stock: "",
       image: toInputValue(product.image),
+      allow_portion_sales: Boolean(product.allow_portion_sales),
+      portions_per_unit: toInputValue(product.portions_per_unit),
+      portion_price: toInputValue(product.portion_price),
     });
 
     setSelectedImage(null);
@@ -444,7 +496,6 @@ function Products() {
       await api.delete(`/products/${product.id}`);
 
       alert("Product deactivated successfully.");
-
       await fetchProducts();
     } catch (error) {
       console.error("Failed to deactivate product:", error);
@@ -472,6 +523,21 @@ function Products() {
     ? Number(sellingPriceText) - Number(buyingPriceText)
     : null;
 
+  const portionPriceText = toInputValue(
+    formData.portion_price
+  ).trim();
+
+  const portionPriceNumber = Number(portionPriceText);
+  const portionCount = Number(formData.portions_per_unit);
+
+  const validPortionPreview =
+    formData.allow_portion_sales &&
+    Number.isInteger(portionCount) &&
+    portionCount > 0 &&
+    portionPriceText !== "" &&
+    Number.isFinite(portionPriceNumber) &&
+    portionPriceNumber >= 0;
+
   return (
     <div className="container py-4">
       <div className="d-flex justify-content-between align-items-center mb-4 gap-3 flex-wrap">
@@ -479,7 +545,7 @@ function Products() {
           <h2 className="fw-bold mb-1">Product Management</h2>
 
           <p className="text-muted mb-0">
-            Manage products, buying costs, selling prices and stock.
+            Manage products, costs, selling prices, inventory and portion sales.
           </p>
         </div>
 
@@ -504,7 +570,6 @@ function Products() {
               <div className="row g-3">
                 <div className="col-md-6">
                   <label className="form-label">Product Name</label>
-
                   <input
                     type="text"
                     name="name"
@@ -517,7 +582,6 @@ function Products() {
 
                 <div className="col-md-6">
                   <label className="form-label">Category</label>
-
                   <input
                     type="text"
                     name="category"
@@ -530,10 +594,7 @@ function Products() {
                 </div>
 
                 <div className="col-md-4">
-                  <label className="form-label">
-                    Buying Price (KSh)
-                  </label>
-
+                  <label className="form-label">Buying Price (KSh)</label>
                   <input
                     type="number"
                     name="buying_price"
@@ -542,20 +603,16 @@ function Products() {
                     onChange={handleChange}
                     min="0"
                     step="0.01"
-                    placeholder="Cost to the business"
+                    placeholder="Cost per whole stock unit"
                     required={!editingProduct}
                   />
-
                   <small className="text-muted">
-                    Cost of purchasing one unit.
+                    Cost of purchasing one whole stock unit.
                   </small>
                 </div>
 
                 <div className="col-md-4">
-                  <label className="form-label">
-                    Selling Price (KSh)
-                  </label>
-
+                  <label className="form-label">Selling Price (KSh)</label>
                   <input
                     type="number"
                     name="price"
@@ -566,31 +623,29 @@ function Products() {
                     step="0.01"
                     required
                   />
-
                   <small className="text-muted">
-                    Price charged to customers.
+                    Price charged for one whole stock unit.
                   </small>
                 </div>
 
                 <div className="col-md-4">
-                  <label className="form-label">Unit</label>
-
+                  <label className="form-label">Stock Unit</label>
                   <input
                     type="text"
                     name="unit"
                     className="form-control"
                     value={formData.unit}
                     onChange={handleChange}
-                    placeholder="e.g. 750ml, 1L, 500g, 1 pack"
+                    placeholder="e.g. bottle, crate, 750ml"
                     required
                   />
+                  <small className="text-muted">
+                    The unit used to track branch inventory.
+                  </small>
                 </div>
 
                 <div className="col-md-4">
-                  <label className="form-label">
-                    General Product Stock
-                  </label>
-
+                  <label className="form-label">General Product Stock</label>
                   <input
                     type="number"
                     name="stock"
@@ -598,12 +653,11 @@ function Products() {
                     value={formData.stock}
                     onChange={handleChange}
                     min="0"
-                    step="1"
+                    step="0.001"
                     required
                   />
-
                   <small className="text-muted">
-                    General product inventory; separate from branch stock.
+                    General inventory, separate from branch stock.
                   </small>
                 </div>
 
@@ -623,9 +677,7 @@ function Products() {
                         required
                       >
                         <option value="">
-                          {loadingBranches
-                            ? "Loading branches..."
-                            : "Select a branch"}
+                          {loadingBranches ? "Loading branches..." : "Select a branch"}
                         </option>
 
                         {branches.map((branch) => (
@@ -638,16 +690,14 @@ function Products() {
 
                       {!loadingBranches && branches.length === 0 && (
                         <small className="text-danger d-block mt-1">
-                          No active branches found. Check your branch setup
-                          and admin access.
+                          No active branches found. Check your branch setup and admin access.
                         </small>
                       )}
                     </div>
 
                     <div className="col-md-4">
                       <label className="form-label">
-                        Initial Branch Stock{" "}
-                        <span className="text-danger">*</span>
+                        Initial Branch Stock <span className="text-danger">*</span>
                       </label>
 
                       <input
@@ -657,31 +707,28 @@ function Products() {
                         value={formData.initial_branch_stock}
                         onChange={handleChange}
                         min="0"
-                        step="1"
+                        step="0.001"
                         placeholder="Quantity available at this branch"
                         required
                       />
 
                       <small className="text-muted">
-                        Stock available to sell at the selected branch's POS.
+                        Stock available to sell at this branch's POS.
                       </small>
                     </div>
 
                     <div className="col-12">
                       <div className="alert alert-info mb-0">
                         <i className="bi bi-info-circle me-2"></i>
-                        The selected branch receives the initial branch
-                        stock. Other branches will not receive stock
-                        automatically.
+                        Only the selected branch receives this initial stock.
+                        Other branches are not updated automatically.
                       </div>
                     </div>
                   </>
                 )}
 
                 <div className={editingProduct ? "col-md-8" : "col-md-12"}>
-                  <label className="form-label">
-                    Gross Profit per Unit
-                  </label>
+                  <label className="form-label">Gross Profit per Whole Unit</label>
 
                   <div className="form-control bg-light">
                     {grossProfitPreview !== null
@@ -695,8 +742,114 @@ function Products() {
                 </div>
 
                 <div className="col-12">
-                  <label className="form-label">Description</label>
+                  <hr />
+                  <h6 className="fw-bold">Portion Selling</h6>
 
+                  <div className="form-check form-switch mb-3">
+                    <input
+                      className="form-check-input"
+                      type="checkbox"
+                      role="switch"
+                      id="allow_portion_sales"
+                      name="allow_portion_sales"
+                      checked={formData.allow_portion_sales}
+                      onChange={handleChange}
+                    />
+
+                    <label
+                      className="form-check-label"
+                      htmlFor="allow_portion_sales"
+                    >
+                      Allow this product to be sold in portions
+                    </label>
+                  </div>
+
+                  {formData.allow_portion_sales && (
+                    <div className="row g-3">
+                      <div className="col-md-4">
+                        <label className="form-label">
+                          Portions per Whole Unit
+                        </label>
+
+                        <input
+                          type="number"
+                          name="portions_per_unit"
+                          className="form-control"
+                          min="1"
+                          step="1"
+                          value={formData.portions_per_unit}
+                          onChange={handleChange}
+                          placeholder="e.g. 4"
+                          required
+                        />
+
+                        <small className="text-muted">
+                          How many portions come from one stock unit.
+                        </small>
+                      </div>
+
+                      <div className="col-md-4">
+                        <label className="form-label">
+                          Selling Price per Portion (KSh)
+                        </label>
+
+                        <input
+                          type="number"
+                          name="portion_price"
+                          className="form-control"
+                          min="0"
+                          step="0.01"
+                          value={formData.portion_price}
+                          onChange={handleChange}
+                          placeholder="e.g. 90"
+                          required
+                        />
+                      </div>
+
+                      <div className="col-md-4">
+                        <label className="form-label">
+                          Revenue if All Portions Sell
+                        </label>
+
+                        <div className="form-control bg-light">
+                          {validPortionPreview
+                            ? `KSh ${formatMoney(
+                                portionCount * portionPriceNumber
+                              )}`
+                            : "Enter portion count and price"}
+                        </div>
+
+                        <small className="text-muted">
+                          Compared with the whole-unit price of KSh{" "}
+                          {formatMoney(formData.price)}.
+                        </small>
+                      </div>
+
+                      {validPortionPreview && (
+                        <div className="col-12">
+                          <div className="alert alert-info mb-0">
+                            One whole stock unit provides{" "}
+                            <strong>{portionCount} portions</strong>. At{" "}
+                            <strong>
+                              KSh {formatMoney(portionPriceNumber)}
+                            </strong>{" "}
+                            each, selling all portions generates{" "}
+                            <strong>
+                              KSh{" "}
+                              {formatMoney(
+                                portionCount * portionPriceNumber
+                              )}
+                            </strong>
+                            . Inventory will be tracked in whole-unit equivalents.
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+
+                <div className="col-12">
+                  <label className="form-label">Description</label>
                   <textarea
                     name="description"
                     className="form-control"
@@ -721,8 +874,7 @@ function Products() {
                     />
 
                     <small className="text-muted d-block mt-2">
-                      Supported formats: JPG, PNG, WEBP and GIF.
-                      Maximum size: 5 MB.
+                      Supported formats: JPG, PNG, WEBP and GIF. Maximum size: 5 MB.
                     </small>
 
                     {selectedImage && (
@@ -734,9 +886,7 @@ function Products() {
 
                     {imagePreview && (
                       <div className="mt-3">
-                        <p className="small fw-semibold mb-2">
-                          Image Preview
-                        </p>
+                        <p className="small fw-semibold mb-2">Image Preview</p>
 
                         <img
                           src={imagePreview}
@@ -796,8 +946,7 @@ function Products() {
                   />
 
                   <small className="text-muted">
-                    If you select an image from your device, that image
-                    takes priority over this URL.
+                    If you select an image from your device, that image takes priority.
                   </small>
                 </div>
               </div>
@@ -855,17 +1004,12 @@ function Products() {
 
           {loading ? (
             <div className="text-center py-5">
-              <div
-                className="spinner-border text-success"
-                role="status"
-              ></div>
-
+              <div className="spinner-border text-success" role="status"></div>
               <p className="mt-2 text-muted">Loading products...</p>
             </div>
           ) : products.length === 0 ? (
             <div className="text-center py-5">
               <i className="bi bi-box-seam fs-1 text-muted"></i>
-
               <p className="text-muted mt-3">No products found.</p>
 
               <button
@@ -888,6 +1032,7 @@ function Products() {
                     <th>Gross Profit / Unit</th>
                     <th>Unit</th>
                     <th>General Stock</th>
+                    <th>Portion Selling</th>
                     <th>Status</th>
                     <th>Actions</th>
                   </tr>
@@ -921,8 +1066,7 @@ function Products() {
                                 src={product.image}
                                 alt={product.name || "Product"}
                                 onError={(event) => {
-                                  event.currentTarget.style.visibility =
-                                    "hidden";
+                                  event.currentTarget.style.visibility = "hidden";
                                 }}
                                 style={{
                                   width: "50px",
@@ -992,19 +1136,32 @@ function Products() {
                                 : "badge bg-success"
                             }
                           >
-                            {product.stock}
+                            {formatStock(product.stock)}
                           </span>
                         </td>
 
                         <td>
-                          {product.is_active ? (
-                            <span className="badge bg-success">
-                              Active
-                            </span>
+                          {product.allow_portion_sales ? (
+                            <div>
+                              <span className="badge bg-info text-dark">
+                                Enabled
+                              </span>
+                              <div className="small text-muted mt-1">
+                                {product.portions_per_unit} portions
+                                <br />
+                                KSh {formatMoney(product.portion_price)} each
+                              </div>
+                            </div>
                           ) : (
-                            <span className="badge bg-secondary">
-                              Inactive
-                            </span>
+                            <span className="text-muted">Not enabled</span>
+                          )}
+                        </td>
+
+                        <td>
+                          {product.is_active ? (
+                            <span className="badge bg-success">Active</span>
+                          ) : (
+                            <span className="badge bg-secondary">Inactive</span>
                           )}
                         </td>
 

@@ -9,6 +9,21 @@ import {
 import { useNavigate } from "react-router-dom";
 import api from "../../api/api";
 
+const DECIMAL_PLACES = 3;
+
+function toNumber(value, fallback = 0) {
+  if (value === null || value === undefined || value === "") {
+    return fallback;
+  }
+
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
+}
+
+function roundStock(value) {
+  return Number(Number(value).toFixed(DECIMAL_PLACES));
+}
+
 function CashierPOS() {
   const navigate = useNavigate();
 
@@ -53,12 +68,7 @@ function CashierPOS() {
   // ============================================================
 
   const fetchProducts = useCallback(async () => {
-    // IMPORTANT:
-    // Do not use /products here. That is the global catalogue.
-    // This endpoint must return only products assigned to the
-    // authenticated cashier's branch.
     const response = await api.get("/cashier/stock/products");
-
     const data = response.data;
 
     const productList = Array.isArray(data)
@@ -76,47 +86,90 @@ function CashierPOS() {
     }
 
     const normalizedProducts = productList.map((product) => {
-  // Prefer branch-specific stock over global product stock.
-  const branchQuantity =
-    product.branch_stock ??
-    product.quantity ??
-    product.stock_quantity ??
-    product.quantity_in_stock ??
-    product.stock ??
-    null;
+      const branchQuantity =
+        product.branch_stock ??
+        product.quantity ??
+        product.stock_quantity ??
+        product.quantity_in_stock ??
+        product.stock ??
+        null;
 
-  // Support different names for the product's selling price.
-  const sellingPrice =
-    product.price ??
-    product.selling_price ??
-    product.unit_price ??
-    product.retail_price ??
-    product.sale_price ??
-    null;
+      const rawPrice =
+        product.price ??
+        product.selling_price ??
+        product.unit_price ??
+        product.retail_price ??
+        product.sale_price ??
+        null;
 
-  return {
-    ...product,
+      const price =
+        rawPrice === null ||
+        rawPrice === undefined ||
+        rawPrice === ""
+          ? null
+          : Number(rawPrice);
 
-    // Normalize the selling price for the POS.
-    price:
-      sellingPrice === null ||
-      sellingPrice === undefined ||
-      sellingPrice === ""
-        ? null
-        : Number(sellingPrice),
+      const rawPortionPrice = product.portion_price;
 
-    // Preserve branch-specific inventory.
-    stock_quantity:
-      branchQuantity === null ||
-      branchQuantity === undefined ||
-      branchQuantity === ""
-        ? null
-        : Number(branchQuantity),
-  };
-});
+      const portionPrice =
+        rawPortionPrice === null ||
+        rawPortionPrice === undefined ||
+        rawPortionPrice === ""
+          ? null
+          : Number(rawPortionPrice);
+
+      const rawPortions = product.portions_per_unit;
+
+      const portionsPerUnit =
+        rawPortions === null ||
+        rawPortions === undefined ||
+        rawPortions === ""
+          ? null
+          : Number(rawPortions);
+
+      const rawStock =
+        branchQuantity === null ||
+        branchQuantity === undefined ||
+        branchQuantity === ""
+          ? null
+          : Number(branchQuantity);
+
+      return {
+        ...product,
+        price:
+          price !== null && Number.isFinite(price) && price >= 0
+            ? price
+            : null,
+        portion_price:
+          portionPrice !== null &&
+          Number.isFinite(portionPrice) &&
+          portionPrice >= 0
+            ? portionPrice
+            : null,
+        portions_per_unit:
+          portionsPerUnit !== null &&
+          Number.isInteger(portionsPerUnit) &&
+          portionsPerUnit > 0
+            ? portionsPerUnit
+            : null,
+        allow_portion_sales:
+          product.allow_portion_sales === true ||
+          product.allow_portion_sales === 1 ||
+          product.allow_portion_sales === "true",
+        stock_quantity:
+          rawStock !== null &&
+          Number.isFinite(rawStock) &&
+          rawStock >= 0
+            ? rawStock
+            : null,
+      };
+    });
+
     if (mountedRef.current) {
       setProducts(normalizedProducts);
     }
+
+    return normalizedProducts;
   }, []);
 
   useEffect(() => {
@@ -126,7 +179,6 @@ function CashierPOS() {
       try {
         setLoading(true);
         setError("");
-
         await fetchProducts();
       } catch (err) {
         if (active) {
@@ -150,6 +202,122 @@ function CashierPOS() {
       active = false;
     };
   }, [fetchProducts]);
+
+  // ============================================================
+  // PRODUCT HELPERS
+  // ============================================================
+
+  const getPrice = (product) => {
+    const price =
+      product.price ??
+      product.selling_price ??
+      product.unit_price ??
+      product.retail_price ??
+      product.sale_price;
+
+    if (price === null || price === undefined || price === "") {
+      return null;
+    }
+
+    const number = Number(price);
+
+    return Number.isFinite(number) && number >= 0
+      ? number
+      : null;
+  };
+
+  const getPortionPrice = (product) => {
+    const price = product.portion_price;
+
+    if (price === null || price === undefined || price === "") {
+      return null;
+    }
+
+    const number = Number(price);
+
+    return Number.isFinite(number) && number >= 0
+      ? number
+      : null;
+  };
+
+  const canSellPortions = (product) =>
+    product.allow_portion_sales === true &&
+    Number.isInteger(Number(product.portions_per_unit)) &&
+    Number(product.portions_per_unit) > 0 &&
+    getPortionPrice(product) !== null;
+
+  const getStock = (product) => {
+    const value =
+      product.stock_quantity ??
+      product.quantity_in_stock ??
+      product.branch_stock ??
+      product.quantity ??
+      product.stock;
+
+    if (value === undefined || value === null || value === "") {
+      return null;
+    }
+
+    const quantity = Number(value);
+
+    return Number.isFinite(quantity) && quantity >= 0
+      ? quantity
+      : null;
+  };
+
+  const getSellingPrice = (item) =>
+    item.selling_unit === "portion"
+      ? getPortionPrice(item)
+      : getPrice(item);
+
+  // Convert the quantity sold into stock-unit equivalents.
+  // Example: 2 portions from a bottle containing 4 portions
+  // consume 2 / 4 = 0.500 bottles.
+  const getStockConsumption = (item) => {
+    const quantity = toNumber(item.sale_quantity);
+
+    if (item.selling_unit === "portion") {
+      const portions = Number(item.portions_per_unit);
+
+      if (!Number.isInteger(portions) || portions <= 0) {
+        return Infinity;
+      }
+
+      return roundStock(quantity / portions);
+    }
+
+    return roundStock(quantity);
+  };
+
+  const getCartKey = (productId, sellingUnit) =>
+    `${productId}:${sellingUnit}`;
+
+  const getProductStockUsed = (productId, excludedCartKey = null) =>
+    cart.reduce((total, item) => {
+      if (
+        String(item.id) !== String(productId) ||
+        item.cartKey === excludedCartKey
+      ) {
+        return total;
+      }
+
+      return total + getStockConsumption(item);
+    }, 0);
+
+  const getAvailableStock = (product, excludedCartKey = null) => {
+    const stock = getStock(product);
+
+    if (stock === null) {
+      return null;
+    }
+
+    return Math.max(
+      0,
+      roundStock(
+        stock - getProductStockUsed(product.id, excludedCartKey)
+      )
+    );
+  };
 
   // ============================================================
   // SEARCH
@@ -176,136 +344,220 @@ function CashierPOS() {
   }, [products, search]);
 
   // ============================================================
-  // PRICE AND BRANCH STOCK
-  // ============================================================
-
-  const getPrice = (product) => {
-  const rawPrice =
-    product.price ??
-    product.selling_price ??
-    product.unit_price ??
-    product.retail_price ??
-    product.sale_price;
-
-  if (
-    rawPrice === null ||
-    rawPrice === undefined ||
-    rawPrice === ""
-  ) {
-    return 0;
-  }
-
-  const price = Number(rawPrice);
-
-  return Number.isFinite(price) && price >= 0
-    ? price
-    : 0;
-};
-
-  const getStock = (product) => {
-    const value =
-      product.stock_quantity ??
-      product.quantity_in_stock ??
-      product.branch_stock ??
-      product.quantity ??
-      product.stock;
-
-    if (value === undefined || value === null || value === "") {
-      return null;
-    }
-
-    const quantity = Number(value);
-
-    return Number.isFinite(quantity) && quantity >= 0
-      ? quantity
-      : null;
-  };
-
-  // ============================================================
   // CART
   // ============================================================
 
-  const addToCart = (product) => {
+  const addToCart = (product, sellingUnit = "unit") => {
     setError("");
     setMessage("");
 
-    const stock = getStock(product);
+    const stock = getAvailableStock(product);
 
     if (stock === null) {
       setError(
-        `The branch stock quantity for ${product.name} is unavailable. Refresh the products before selling.`
+        `Branch stock for ${product.name} is unavailable. Refresh the products before selling.`
       );
       return;
     }
 
     if (stock <= 0) {
-      setError(`${product.name} is out of stock at your branch.`);
+      setError(
+        `${product.name} does not have enough stock at your branch.`
+      );
       return;
     }
 
-    setCart((currentCart) => {
-      const existing = currentCart.find(
-        (item) => item.id === product.id
+    if (sellingUnit === "portion" && !canSellPortions(product)) {
+      setError(
+        `Portion selling is not configured correctly for ${product.name}.`
       );
+      return;
+    }
 
-      if (existing) {
-        if (existing.quantity >= stock) {
-          setError(
-            `Only ${stock} units of ${product.name} are available at your branch.`
-          );
+    const sellingPrice =
+      sellingUnit === "portion"
+        ? getPortionPrice(product)
+        : getPrice(product);
 
-          return currentCart;
-        }
+    if (sellingPrice === null) {
+      setError(
+        `The ${sellingUnit === "portion" ? "portion" : "unit"} selling price for ${product.name} is unavailable.`
+      );
+      return;
+    }
 
-        return currentCart.map((item) =>
-          item.id === product.id
-            ? { ...item, quantity: item.quantity + 1 }
-            : item
+    const cartKey = getCartKey(product.id, sellingUnit);
+
+    const existing = cart.find((item) => item.cartKey === cartKey);
+
+    if (existing) {
+      const nextQuantity = existing.sale_quantity + 1;
+
+      const nextConsumption =
+        sellingUnit === "portion"
+          ? roundStock(
+              nextQuantity / Number(product.portions_per_unit)
+            )
+          : roundStock(nextQuantity);
+
+      if (nextConsumption > stock) {
+        setError(
+          `Insufficient branch stock for ${product.name}.`
         );
+        return;
       }
 
-      return [...currentCart, { ...product, quantity: 1 }];
-    });
+      setCart((current) =>
+        current.map((item) =>
+          item.cartKey === cartKey
+            ? { ...item, sale_quantity: nextQuantity }
+            : item
+        )
+      );
+
+      return;
+    }
+
+    const initialConsumption =
+      sellingUnit === "portion"
+        ? roundStock(1 / Number(product.portions_per_unit))
+        : 1;
+
+    if (initialConsumption > stock) {
+      setError(
+        `Insufficient branch stock for ${product.name}.`
+      );
+      return;
+    }
+
+    setCart((current) => [
+      ...current,
+      {
+        ...product,
+        cartKey,
+        selling_unit: sellingUnit,
+        sale_quantity: 1,
+      },
+    ]);
   };
 
-  const removeFromCart = (productId) => {
-    setCart((currentCart) =>
-      currentCart.filter((item) => item.id !== productId)
+  const removeFromCart = (cartKey) => {
+    setCart((current) =>
+      current.filter((item) => item.cartKey !== cartKey)
     );
   };
 
-  const updateQuantity = (productId, quantity) => {
+  const updateQuantity = (cartKey, quantity) => {
     setError("");
     setMessage("");
 
-    const product = products.find((item) => item.id === productId);
+    const item = cart.find((entry) => entry.cartKey === cartKey);
 
-    if (!product) {
+    if (!item) {
+      return;
+    }
+
+    if (!Number.isFinite(quantity)) {
       return;
     }
 
     if (quantity <= 0) {
-      removeFromCart(productId);
+      removeFromCart(cartKey);
       return;
     }
 
-    const stock = getStock(product);
+    if (item.selling_unit === "portion" && !Number.isInteger(quantity)) {
+      setError("Portion quantities must be whole numbers.");
+      return;
+    }
+
+    const stock = getStock(item);
 
     if (stock === null) {
-      setError(`Unable to verify branch stock for ${product.name}.`);
+      setError(`Unable to verify branch stock for ${item.name}.`);
       return;
     }
 
-    if (quantity > stock) {
+    const available = getAvailableStock(item, cartKey);
+
+    const consumption =
+      item.selling_unit === "portion"
+        ? roundStock(quantity / Number(item.portions_per_unit))
+        : roundStock(quantity);
+
+    if (consumption > available) {
       setError(
-        `Only ${stock} units of ${product.name} are available at your branch.`
+        `Insufficient branch stock for ${item.name}. Available stock: ${available} bottle/unit equivalents.`
       );
       return;
     }
 
-    setCart((currentCart) =>
-      currentCart.map((item) =>
-        item.id === productId ? { ...item, quantity } : item
+    setCart((current) =>
+      current.map((entry) =>
+        entry.cartKey === cartKey
+          ? { ...entry, sale_quantity: quantity }
+          : entry
+      )
+    );
+  };
+
+  const changeSellingUnit = (cartKey, sellingUnit) => {
+    setError("");
+    setMessage("");
+
+    const item = cart.find((entry) => entry.cartKey === cartKey);
+
+    if (!item) {
+      return;
+    }
+
+    if (sellingUnit === "portion" && !canSellPortions(item)) {
+      setError(`Portion selling is unavailable for ${item.name}.`);
+      return;
+    }
+
+    const price =
+      sellingUnit === "portion"
+        ? getPortionPrice(item)
+        : getPrice(item);
+
+    if (price === null) {
+      setError(`The selling price for ${item.name} is unavailable.`);
+      return;
+    }
+
+    const nextKey = getCartKey(item.id, sellingUnit);
+
+    if (nextKey !== cartKey && cart.some((entry) => entry.cartKey === nextKey)) {
+      setError(
+        `${item.name} already has a separate ${sellingUnit} line in the cart.`
+      );
+      return;
+    }
+
+    const stock = getStock(item);
+    const available = getAvailableStock(item, cartKey);
+
+    const nextConsumption =
+      sellingUnit === "portion"
+        ? roundStock(1 / Number(item.portions_per_unit))
+        : 1;
+
+    if (stock === null || nextConsumption > available) {
+      setError(`Insufficient branch stock for ${item.name}.`);
+      return;
+    }
+
+    setCart((current) =>
+      current.map((entry) =>
+        entry.cartKey === cartKey
+          ? {
+              ...entry,
+              cartKey: nextKey,
+              selling_unit: sellingUnit,
+              sale_quantity: 1,
+            }
+          : entry
       )
     );
   };
@@ -321,19 +573,32 @@ function CashierPOS() {
   // ============================================================
 
   const totalItems = cart.reduce(
-    (total, item) => total + item.quantity,
+    (total, item) => total + toNumber(item.sale_quantity),
     0
   );
 
-  const totalAmount = cart.reduce(
-    (total, item) => total + getPrice(item) * item.quantity,
-    0
+  const totalAmount = cart.reduce((total, item) => {
+    const price = getSellingPrice(item);
+
+    return total + (price ?? 0) * toNumber(item.sale_quantity);
+  }, 0);
+
+  const totalStockConsumption = roundStock(
+    cart.reduce(
+      (total, item) => total + getStockConsumption(item),
+      0
+    )
   );
 
   const formatCurrency = (value) =>
     Number(value || 0).toLocaleString("en-KE", {
       minimumFractionDigits: 2,
       maximumFractionDigits: 2,
+    });
+
+  const formatQuantity = (value) =>
+    Number(value || 0).toLocaleString("en-KE", {
+      maximumFractionDigits: 3,
     });
 
   // ============================================================
@@ -474,7 +739,6 @@ function CashierPOS() {
               return;
             }
           } catch (err) {
-            // A temporary network error is not proof of payment failure.
             console.error(
               "Unable to check cashier M-Pesa payment status:",
               err
@@ -495,9 +759,7 @@ function CashierPOS() {
           );
         }
       } finally {
-        if (
-          Number(pollingSaleRef.current) === Number(saleId)
-        ) {
+        if (Number(pollingSaleRef.current) === Number(saleId)) {
           pollingRef.current = false;
           pollingSaleRef.current = null;
         }
@@ -548,6 +810,35 @@ function CashierPOS() {
       }
     }
 
+    // Prevent sending a sale with missing prices or invalid quantities.
+    for (const item of cart) {
+      const price = getSellingPrice(item);
+      const quantity = Number(item.sale_quantity);
+      const stock = getStock(item);
+
+      if (
+        price === null ||
+        !Number.isFinite(quantity) ||
+        quantity <= 0 ||
+        stock === null
+      ) {
+        setError(
+          `Check the price, quantity and branch stock for ${item.name} before checkout.`
+        );
+        return;
+      }
+
+      if (
+        item.selling_unit === "portion" &&
+        (!Number.isInteger(quantity) || !canSellPortions(item))
+      ) {
+        setError(
+          `The portion configuration for ${item.name} is invalid.`
+        );
+        return;
+      }
+    }
+
     setCheckoutLoading(true);
 
     let saleCreated = false;
@@ -561,7 +852,16 @@ function CashierPOS() {
         payment_method: paymentMethod,
         items: cart.map((item) => ({
           product_id: item.id,
-          quantity: item.quantity,
+
+          // The quantity sold in the selected selling unit.
+          quantity: Number(item.sale_quantity),
+
+          // Also send the explicit field for compatible backends.
+          sale_quantity: Number(item.sale_quantity),
+
+          // "unit" means whole stock units; "portion" means
+          // portions configured on the product.
+          selling_unit: item.selling_unit,
         })),
       };
 
@@ -570,7 +870,6 @@ function CashierPOS() {
         payload
       );
 
-      // The backend returns "sale", NOT "order".
       const sale = response.data?.sale;
 
       if (!sale || !sale.id || !sale.sale_number) {
@@ -647,7 +946,7 @@ function CashierPOS() {
       try {
         await fetchProducts();
       } catch {
-        // Do not interrupt payment confirmation if stock refresh fails.
+        // Payment confirmation must continue if refreshing stock fails.
       }
 
       // --------------------------------------------------------
@@ -746,11 +1045,18 @@ function CashierPOS() {
         <hr />
 
         {(receipt.items || []).map((item, index) => {
-          const itemPrice = Number(item.price || 0);
-          const quantity = Number(item.quantity || 0);
-          const subtotal = Number(
-            item.subtotal ?? itemPrice * quantity
+          const itemPrice = toNumber(item.price);
+          const quantity = toNumber(
+            item.sale_quantity ?? item.quantity
           );
+
+          const subtotal = toNumber(
+            item.subtotal,
+            itemPrice * quantity
+          );
+
+          const sellingUnit =
+            item.selling_unit === "portion" ? "portion(s)" : "unit(s)";
 
           return (
             <div
@@ -765,7 +1071,8 @@ function CashierPOS() {
                 </strong>
 
                 <div className="pos-receipt-muted">
-                  {quantity} × KSh {formatCurrency(itemPrice)}
+                  {formatQuantity(quantity)} {sellingUnit} × KSh{" "}
+                  {formatCurrency(itemPrice)}
                 </div>
               </div>
 
@@ -903,11 +1210,8 @@ function CashierPOS() {
           <div style={styles.headerRight}>
             <div style={styles.cashierInfo}>
               <span style={styles.cashierLabel}>Signed in as</span>
-
               <strong>
-                {cashier?.full_name ||
-                  cashier?.username ||
-                  "Cashier"}
+                {cashier?.full_name || cashier?.username || "Cashier"}
               </strong>
             </div>
 
@@ -943,7 +1247,6 @@ function CashierPOS() {
 
         <main style={styles.layout}>
           {/* PRODUCTS */}
-
           <section style={styles.productPanel}>
             <div style={styles.panelHeading}>
               <h2 style={styles.sectionTitle}>Branch Products</h2>
@@ -968,7 +1271,6 @@ function CashierPOS() {
             ) : filteredProducts.length === 0 ? (
               <div style={styles.emptyState}>
                 <h3>No branch products found</h3>
-
                 <p>
                   No products are assigned to this branch, or your
                   search returned no results. Contact the administrator
@@ -979,15 +1281,25 @@ function CashierPOS() {
               <div style={styles.productGrid}>
                 {filteredProducts.map((product) => {
                   const stock = getStock(product);
+                  const wholePrice = getPrice(product);
+                  const portionPrice = getPortionPrice(product);
+                  const canPortion = canSellPortions(product);
+                  const availableStock = getAvailableStock(product);
 
-                  const inCart = cart.find(
-                    (item) => item.id === product.id
+                  const unitInCart = cart.some(
+                    (item) =>
+                      item.cartKey === getCartKey(product.id, "unit")
+                  );
+
+                  const portionInCart = cart.some(
+                    (item) =>
+                      item.cartKey === getCartKey(product.id, "portion")
                   );
 
                   const unavailable =
                     stock === null ||
                     stock <= 0 ||
-                    (Boolean(inCart) && inCart.quantity >= stock);
+                    availableStock === 0;
 
                   return (
                     <article
@@ -1005,36 +1317,69 @@ function CashierPOS() {
                       </p>
 
                       <p style={styles.price}>
-                        KSh {formatCurrency(getPrice(product))}
+                        Whole:{" "}
+                        {wholePrice === null
+                          ? "Price unavailable"
+                          : `KSh ${formatCurrency(wholePrice)}`}
                       </p>
+
+                      {canPortion && (
+                        <p style={styles.portionPrice}>
+                          Portion: KSh {formatCurrency(portionPrice)}
+                          {" · "}
+                          {product.portions_per_unit} per unit
+                        </p>
+                      )}
 
                       <p style={styles.stock}>
                         {stock === null
                           ? "Stock unavailable"
-                          : `${stock} in this branch`}
+                          : `${formatQuantity(stock)} units in this branch`}
                       </p>
 
                       <button
                         type="button"
-                        onClick={() => addToCart(product)}
-                        disabled={unavailable || checkoutLoading}
+                        onClick={() => addToCart(product, "unit")}
+                        disabled={
+                          unavailable ||
+                          checkoutLoading ||
+                          wholePrice === null
+                        }
                         style={{
                           ...styles.addButton,
-                          ...(unavailable || checkoutLoading
+                          ...(unavailable ||
+                          checkoutLoading ||
+                          wholePrice === null
                             ? styles.disabledButton
                             : {}),
                         }}
                       >
-                        {stock === null
-                          ? "Stock unavailable"
-                          : stock <= 0
+                        {wholePrice === null
+                          ? "Price unavailable"
+                          : unavailable
                             ? "Out of stock"
-                            : unavailable
-                              ? "Stock limit reached"
-                              : inCart
-                                ? "Add another"
-                                : "Add to cart"}
+                            : unitInCart
+                              ? "Add another whole unit"
+                              : "Add whole unit"}
                       </button>
+
+                      {canPortion && (
+                        <button
+                          type="button"
+                          onClick={() => addToCart(product, "portion")}
+                          disabled={unavailable || checkoutLoading}
+                          style={{
+                            ...styles.portionButton,
+                            ...(unavailable || checkoutLoading
+                              ? styles.disabledButton
+                              : {}),
+                          }}
+                        >
+                          {portionInCart
+                            ? "Add another portion"
+                            : "Sell a portion"}
+                        </button>
+                      )}
                     </article>
                   );
                 })}
@@ -1043,13 +1388,12 @@ function CashierPOS() {
           </section>
 
           {/* CART */}
-
           <aside style={styles.cartPanel}>
             <div style={styles.panelHeading}>
               <h2 style={styles.sectionTitle}>Current Sale</h2>
 
               <span style={styles.countBadge}>
-                {totalItems} items
+                {formatQuantity(totalItems)} items
               </span>
             </div>
 
@@ -1061,67 +1405,138 @@ function CashierPOS() {
               </div>
             ) : (
               <div style={styles.cartItems}>
-                {cart.map((item) => (
-                  <div key={item.id} style={styles.cartItem}>
-                    <div style={styles.cartItemInfo}>
-                      <strong style={styles.cartItemName}>
-                        {item.name}
-                      </strong>
+                {cart.map((item) => {
+                  const itemPrice = getSellingPrice(item);
+                  const quantity = Number(item.sale_quantity);
+                  const stockConsumption = getStockConsumption(item);
+                  const subtotal =
+                    (itemPrice ?? 0) * quantity;
 
-                      <span style={styles.cartItemPrice}>
-                        KSh{" "}
-                        {formatCurrency(
-                          getPrice(item) * item.quantity
-                        )}
-                      </span>
+                  return (
+                    <div
+                      key={item.cartKey}
+                      style={styles.cartItem}
+                    >
+                      <div style={styles.cartItemInfo}>
+                        <strong style={styles.cartItemName}>
+                          {item.name}
+                        </strong>
 
-                      <div style={styles.quantityControls}>
-                        <button
-                          type="button"
-                          disabled={checkoutLoading}
-                          onClick={() =>
-                            updateQuantity(
-                              item.id,
-                              item.quantity - 1
+                        <label style={styles.smallLabel}>
+                          Selling unit
+                        </label>
+
+                        <select
+                          value={item.selling_unit}
+                          onChange={(event) =>
+                            changeSellingUnit(
+                              item.cartKey,
+                              event.target.value
                             )
                           }
-                          style={styles.quantityButton}
-                          aria-label={`Decrease ${item.name} quantity`}
+                          disabled={checkoutLoading}
+                          style={styles.unitSelect}
                         >
-                          −
-                        </button>
+                          <option value="unit">
+                            Whole unit
+                          </option>
 
-                        <span style={styles.quantity}>
-                          {item.quantity}
+                          {canSellPortions(item) && (
+                            <option value="portion">
+                              Portion
+                            </option>
+                          )}
+                        </select>
+
+                        <span style={styles.cartItemPrice}>
+                          {itemPrice === null
+                            ? "Price unavailable"
+                            : `KSh ${formatCurrency(itemPrice)} each`}
                         </span>
 
-                        <button
-                          type="button"
-                          disabled={checkoutLoading}
-                          onClick={() =>
-                            updateQuantity(
-                              item.id,
-                              item.quantity + 1
-                            )
-                          }
-                          style={styles.quantityButton}
-                          aria-label={`Increase ${item.name} quantity`}
-                        >
-                          +
-                        </button>
+                        <span style={styles.cartItemPrice}>
+                          Subtotal: KSh {formatCurrency(subtotal)}
+                        </span>
 
-                        <button
-                          type="button"
-                          disabled={checkoutLoading}
-                          onClick={() => removeFromCart(item.id)}
-                          style={styles.removeButton}
-                        >
-                          Remove
-                        </button>
+                        <div style={styles.quantityControls}>
+                          <button
+                            type="button"
+                            disabled={checkoutLoading || quantity <= 1}
+                            onClick={() =>
+                              updateQuantity(
+                                item.cartKey,
+                                quantity -
+                                  (item.selling_unit === "portion"
+                                    ? 1
+                                    : 1)
+                              )
+                            }
+                            style={styles.quantityButton}
+                            aria-label={`Decrease ${item.name} quantity`}
+                          >
+                            −
+                          </button>
+
+                          <input
+                            type="number"
+                            min="0.001"
+                            step={
+                              item.selling_unit === "portion"
+                                ? "1"
+                                : "0.001"
+                            }
+                            value={item.sale_quantity}
+                            disabled={checkoutLoading}
+                            onChange={(event) => {
+                              const value = event.target.value;
+
+                              if (value === "") {
+                                return;
+                              }
+
+                              const next = Number(value);
+
+                              if (Number.isFinite(next)) {
+                                updateQuantity(item.cartKey, next);
+                              }
+                            }}
+                            style={styles.quantityInput}
+                            aria-label={`${item.name} quantity`}
+                          />
+
+                          <button
+                            type="button"
+                            disabled={checkoutLoading}
+                            onClick={() =>
+                              updateQuantity(
+                                item.cartKey,
+                                quantity + 1
+                              )
+                            }
+                            style={styles.quantityButton}
+                            aria-label={`Increase ${item.name} quantity`}
+                          >
+                            +
+                          </button>
+
+                          <button
+                            type="button"
+                            disabled={checkoutLoading}
+                            onClick={() => removeFromCart(item.cartKey)}
+                            style={styles.removeButton}
+                          >
+                            Remove
+                          </button>
+                        </div>
+
+                        <small style={styles.stockConsumption}>
+                          Branch stock consumed:{" "}
+                          {formatQuantity(stockConsumption)} unit(s)
+                        </small>
                       </div>
                     </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )}
 
@@ -1179,8 +1594,15 @@ function CashierPOS() {
               )}
 
               <div style={styles.summaryRow}>
-                <span>Total units</span>
-                <strong>{totalItems}</strong>
+                <span>Items sold</span>
+                <strong>{formatQuantity(totalItems)}</strong>
+              </div>
+
+              <div style={styles.summaryRow}>
+                <span>Stock consumed</span>
+                <strong>
+                  {formatQuantity(totalStockConsumption)} units
+                </strong>
               </div>
 
               <div style={styles.totalRow}>
@@ -1408,7 +1830,7 @@ const styles = {
   salesHistoryButton: {
     padding: "10px 16px",
     background: "#2563eb",
-    color: "#ffffff",
+    color: "#fff",
     border: "none",
     borderRadius: "8px",
     cursor: "pointer",
@@ -1501,6 +1923,7 @@ const styles = {
     display: "flex",
     flexDirection: "column",
     alignItems: "flex-start",
+    minWidth: 0,
   },
   productIcon: {
     display: "grid",
@@ -1524,8 +1947,14 @@ const styles = {
   price: {
     margin: "13px 0 5px",
     color: "#166534",
-    fontSize: "18px",
+    fontSize: "16px",
     fontWeight: "700",
+  },
+  portionPrice: {
+    margin: "4px 0 8px",
+    color: "#1d4ed8",
+    fontSize: "13px",
+    fontWeight: "600",
   },
   stock: {
     margin: "0 0 14px",
@@ -1540,6 +1969,17 @@ const styles = {
     borderRadius: "7px",
     background: "#166534",
     color: "#fff",
+    fontWeight: "600",
+    cursor: "pointer",
+  },
+  portionButton: {
+    width: "100%",
+    marginTop: "8px",
+    padding: "10px",
+    border: "1px solid #bfdbfe",
+    borderRadius: "7px",
+    background: "#eff6ff",
+    color: "#1d4ed8",
     fontWeight: "600",
     cursor: "pointer",
   },
@@ -1562,7 +2002,7 @@ const styles = {
     fontSize: "38px",
   },
   cartItems: {
-    maxHeight: "440px",
+    maxHeight: "500px",
     overflowY: "auto",
   },
   cartItem: {
@@ -1576,6 +2016,7 @@ const styles = {
     display: "flex",
     flexDirection: "column",
     gap: "8px",
+    minWidth: 0,
   },
   cartItemName: {
     overflowWrap: "anywhere",
@@ -1583,26 +2024,48 @@ const styles = {
   cartItemPrice: {
     color: "#166534",
     fontWeight: "600",
+    fontSize: "13px",
+  },
+  smallLabel: {
+    color: "#64748b",
+    fontSize: "12px",
+    fontWeight: "600",
+  },
+  unitSelect: {
+    width: "100%",
+    padding: "9px",
+    border: "1px solid #cbd5e1",
+    borderRadius: "7px",
+    background: "#fff",
+    boxSizing: "border-box",
+  },
+  stockConsumption: {
+    color: "#64748b",
+    fontSize: "12px",
   },
   quantityControls: {
     display: "flex",
     alignItems: "center",
-    gap: "10px",
+    gap: "8px",
     flexWrap: "wrap",
   },
   quantityButton: {
-    width: "30px",
-    height: "30px",
+    width: "32px",
+    height: "32px",
     border: "1px solid #cbd5e1",
     borderRadius: "6px",
     background: "#fff",
     cursor: "pointer",
     fontSize: "18px",
   },
-  quantity: {
-    minWidth: "18px",
+  quantityInput: {
+    width: "80px",
+    minWidth: 0,
+    padding: "7px 4px",
+    border: "1px solid #cbd5e1",
+    borderRadius: "6px",
     textAlign: "center",
-    fontWeight: "600",
+    boxSizing: "border-box",
   },
   removeButton: {
     marginLeft: "auto",
@@ -1651,6 +2114,7 @@ const styles = {
   summaryRow: {
     display: "flex",
     justifyContent: "space-between",
+    gap: "10px",
     marginBottom: "16px",
     color: "#64748b",
   },
@@ -1696,3 +2160,4 @@ const styles = {
 };
 
 export default CashierPOS;
+
