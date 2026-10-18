@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import api from "../../api/api";
 
 function SalesHistory() {
@@ -16,107 +16,80 @@ total_pages: 0,
 });
 const [selectedSale, setSelectedSale] = useState(null);
 
-const fetchSales = async (requestedPage = page) => {
+const fetchSales = useCallback(
+async (requestedPage = 1, filters = {}) => {
 try {
 setLoading(true);
 setError("");
 
-  const response = await api.get("/cashier/sales", {
-    params: {
-      page: requestedPage,
-      per_page: 20,
-      ...(startDate ? { start_date: startDate } : {}),
-      ...(endDate ? { end_date: endDate } : {}),
-    },
-  });
 
-  setSales(response.data.sales || []);
-  setPagination(
-    response.data.pagination || {
-      page: requestedPage,
-      per_page: 20,
-      total_sales: 0,
-      total_pages: 0,
-    }
-  );
-  setPage(requestedPage);
-} catch (err) {
-  console.error("Failed to load sales history:", err);
+    const response = await api.get("/cashier/sales", {
+      params: {
+        page: requestedPage,
+        per_page: 20,
+        ...(filters.startDate
+          ? { start_date: filters.startDate }
+          : {}),
+        ...(filters.endDate ? { end_date: filters.endDate } : {}),
+      },
+    });
 
-  setError(
-    err.response?.data?.message ||
-      "Unable to load sales history. Please try again."
-  );
-} finally {
-  setLoading(false);
-}
+    const responseSales = Array.isArray(response.data.sales)
+      ? response.data.sales
+      : [];
+
+    setSales(responseSales);
+    setPagination(
+      response.data.pagination || {
+        page: requestedPage,
+        per_page: 20,
+        total_sales: responseSales.length,
+        total_pages: responseSales.length > 0 ? 1 : 0,
+      }
+    );
+    setPage(requestedPage);
+  } catch (err) {
+    console.error("Failed to load sales history:", err);
+
+    setError(
+      err.response?.data?.message ||
+        "Unable to load sales history. Please try again."
+    );
+  } finally {
+    setLoading(false);
+  }
+},
+[]
 
 
-};
+);
 
 useEffect(() => {
 fetchSales(1);
-// Initial load only. Filters are applied when Search is clicked.
-// eslint-disable-next-line react-hooks/exhaustive-deps
-}, []);
+}, [fetchSales]);
 
 const handleFilter = (event) => {
 event.preventDefault();
 
-
+```
 if (startDate && endDate && startDate > endDate) {
   setError("The start date cannot be after the end date.");
   return;
 }
 
-fetchSales(1);
-
+fetchSales(1, { startDate, endDate });
+```
 
 };
 
 const clearFilters = () => {
 setStartDate("");
 setEndDate("");
-setError("");
-setPage(1);
-
-
-// Explicitly fetch without date filters.
-fetchSalesWithoutFilters();
-
+fetchSales(1, {});
 };
 
-const fetchSalesWithoutFilters = async () => {
-try {
-setLoading(true);
-setError("");
-
-
-  const response = await api.get("/cashier/sales", {
-    params: { page: 1, per_page: 20 },
-  });
-
-  setSales(response.data.sales || []);
-  setPagination(
-    response.data.pagination || {
-      page: 1,
-      per_page: 20,
-      total_sales: 0,
-      total_pages: 0,
-    }
-  );
-  setPage(1);
-} catch (err) {
-  console.error("Failed to clear sales filters:", err);
-  setError(
-    err.response?.data?.message ||
-      "Unable to load sales history. Please try again."
-  );
-} finally {
-  setLoading(false);
-}
-
-
+const changePage = (requestedPage) => {
+fetchSales(requestedPage, { startDate, endDate });
 };
 
 const formatMoney = (amount) =>
@@ -137,6 +110,7 @@ return date.toLocaleString("en-KE", {
   dateStyle: "medium",
   timeStyle: "short",
 });
+
 
 };
 
@@ -163,16 +137,19 @@ if (status === "failed") return "failed";
 
 return "unpaid";
 
+
 };
+
+const getSaleNumber = (sale) =>
+sale.sale_number || `POS-${String(sale.id).padStart(6, "0")}`;
 
 const printReceipt = (sale) => {
 setSelectedSale(sale);
 
 
-// Wait for the receipt details to render before printing.
 window.setTimeout(() => {
   window.print();
-}, 100);
+}, 300);
 
 
 };
@@ -251,6 +228,11 @@ color: #1f2937;
       cursor: pointer;
     }
 
+    .sales-history-button:disabled {
+      opacity: 0.55;
+      cursor: not-allowed;
+    }
+
     .sales-history-search {
       background: #047857;
       color: white;
@@ -294,9 +276,10 @@ color: #1f2937;
       background: #f9fafb;
     }
 
-    .sales-history-order {
+    .sales-history-sale-number {
       font-weight: 700;
       color: #047857;
+      white-space: nowrap;
     }
 
     .sales-history-badge {
@@ -394,6 +377,7 @@ color: #1f2937;
       padding: 24px;
       border-radius: 10px;
       color: #111827;
+      box-sizing: border-box;
     }
 
     .sales-receipt h2,
@@ -419,6 +403,7 @@ color: #1f2937;
       border-bottom: 1px dashed #9ca3af;
       padding: 12px 0;
       margin: 14px 0;
+      overflow-wrap: anywhere;
     }
 
     .sales-receipt table {
@@ -432,11 +417,13 @@ color: #1f2937;
       text-align: left;
       padding: 8px 3px;
       border-bottom: 1px solid #e5e7eb;
+      overflow-wrap: anywhere;
     }
 
     .sales-receipt-total {
       display: flex;
       justify-content: space-between;
+      gap: 12px;
       font-size: 18px;
       font-weight: 800;
       padding-top: 14px;
@@ -455,6 +442,15 @@ color: #1f2937;
     .sales-receipt-close {
       background: #e5e7eb;
       color: #374151;
+    }
+
+    .sales-receipt-warning {
+      margin-top: 14px;
+      padding: 10px;
+      border-radius: 7px;
+      background: #fef3c7;
+      color: #92400e;
+      font-size: 13px;
     }
 
     @media (max-width: 600px) {
@@ -526,7 +522,7 @@ color: #1f2937;
   <div className="sales-history-header">
     <div>
       <h1>Sales History</h1>
-      <p>Review your previous transactions and reprint receipts.</p>
+      <p>Review previous POS transactions and reprint receipts.</p>
     </div>
 
     <div className="sales-history-count">
@@ -580,14 +576,14 @@ color: #1f2937;
   ) : sales.length === 0 ? (
     <div className="sales-history-empty">
       <h3>No sales found</h3>
-      <p>Your transactions will appear here after sales are recorded.</p>
+      <p>Your POS transactions will appear here after sales are recorded.</p>
     </div>
   ) : (
     <div className="sales-history-table-wrap">
       <table className="sales-history-table">
         <thead>
           <tr>
-            <th>Order number</th>
+            <th>Sale number</th>
             <th>Date</th>
             <th>Items</th>
             <th>Total</th>
@@ -600,15 +596,16 @@ color: #1f2937;
         <tbody>
           {sales.map((sale) => (
             <tr key={sale.id}>
-              <td className="sales-history-order">
-                {sale.order_number || `Order #${sale.id}`}
+              <td className="sales-history-sale-number">
+                {getSaleNumber(sale)}
               </td>
 
               <td>{formatDate(sale.created_at)}</td>
 
               <td>
                 {(sale.items || []).reduce(
-                  (total, item) => total + Number(item.quantity || 0),
+                  (total, item) =>
+                    total + Number(item.quantity || 0),
                   0
                 )}
               </td>
@@ -660,8 +657,8 @@ color: #1f2937;
       <button
         className="sales-history-button"
         type="button"
-        disabled={page <= 1}
-        onClick={() => fetchSales(page - 1)}
+        disabled={loading || page <= 1}
+        onClick={() => changePage(page - 1)}
       >
         Previous
       </button>
@@ -673,8 +670,8 @@ color: #1f2937;
       <button
         className="sales-history-button"
         type="button"
-        disabled={page >= pagination.total_pages}
-        onClick={() => fetchSales(page + 1)}
+        disabled={loading || page >= pagination.total_pages}
+        onClick={() => changePage(page + 1)}
       >
         Next
       </button>
@@ -690,21 +687,36 @@ color: #1f2937;
         className="sales-receipt"
         onClick={(event) => event.stopPropagation()}
       >
-        <h2>AGROVET</h2>
+        <h2>HEADMASTER LIQUORS</h2>
+
         <div className="sales-receipt-subtitle">
-          Sales Receipt
+          POS Sales Receipt
         </div>
 
         <div className="sales-receipt-meta">
           <div>
-            <strong>Order:</strong>{" "}
-            {selectedSale.order_number || `#${selectedSale.id}`}
+            <strong>Sale number:</strong>{" "}
+            {getSaleNumber(selectedSale)}
           </div>
 
           <div>
             <strong>Date:</strong>{" "}
             {formatDate(selectedSale.created_at)}
           </div>
+
+          {selectedSale.branch_name && (
+            <div>
+              <strong>Branch:</strong>{" "}
+              {selectedSale.branch_name}
+            </div>
+          )}
+
+          {selectedSale.cashier_name && (
+            <div>
+              <strong>Cashier:</strong>{" "}
+              {selectedSale.cashier_name}
+            </div>
+          )}
 
           <div>
             <strong>Payment method:</strong>{" "}
@@ -717,7 +729,7 @@ color: #1f2937;
           </div>
 
           <div>
-            <strong>Order status:</strong>{" "}
+            <strong>Sale status:</strong>{" "}
             {selectedSale.status || "—"}
           </div>
         </div>
@@ -733,8 +745,8 @@ color: #1f2937;
           </thead>
 
           <tbody>
-            {(selectedSale.items || []).map((item) => (
-              <tr key={item.id}>
+            {(selectedSale.items || []).map((item, index) => (
+              <tr key={item.id || `${item.product_id}-${index}`}>
                 <td>{item.product_name || "Product"}</td>
                 <td>{item.quantity}</td>
                 <td>{formatMoney(item.price)}</td>
@@ -755,12 +767,12 @@ color: #1f2937;
           <span>{formatMoney(selectedSale.total)}</span>
         </div>
 
-        {selectedSale.payment_method === "mpesa" &&
-          selectedSale.payment_status !== "paid" && (
-            <p>
+        {selectedSale.payment_method?.toLowerCase() === "mpesa" &&
+          selectedSale.payment_status?.toLowerCase() !== "paid" && (
+            <div className="sales-receipt-warning">
               M-Pesa payment has not been confirmed. This receipt
               does not confirm successful payment.
-            </p>
+            </div>
           )}
 
         <div className="sales-receipt-actions">
