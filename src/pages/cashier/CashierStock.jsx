@@ -13,6 +13,7 @@ Authorization: `Bearer ${token}`,
 
 function CashierStock() {
 const [products, setProducts] = useState([]);
+const [branch, setBranch] = useState(null);
 const [loading, setLoading] = useState(true);
 const [submitting, setSubmitting] = useState(false);
 const [error, setError] = useState("");
@@ -30,6 +31,7 @@ const loadProducts = useCallback(async () => {
 setLoading(true);
 setError("");
 
+
 try {
   const response = await axios.get(
     `${API_BASE}/cashier/stock/products`,
@@ -39,10 +41,14 @@ try {
   );
 
   setProducts(response.data.products || []);
+  setBranch(response.data.branch || null);
 } catch (err) {
+  setProducts([]);
+  setBranch(null);
+
   setError(
     err.response?.data?.message ||
-      "Unable to load products. Please check your connection and log in again if necessary."
+      "Unable to load branch inventory. Please check your connection and log in again if necessary."
   );
 } finally {
   setLoading(false);
@@ -113,10 +119,13 @@ if (form.notes.trim().length > 5000) {
 const confirmed = window.confirm(
   `Add ${quantity} ${selectedProduct?.unit || "units"} to ${
     selectedProduct?.name || "this product"
-  }?\n\nCurrent stock: ${selectedProduct?.stock ?? "Unknown"}`
+  } at ${branch?.name || "your branch"}?\n\n` +
+    `Current branch stock: ${selectedProduct?.stock ?? "Unknown"}`
 );
 
-if (!confirmed) return;
+if (!confirmed) {
+  return;
+}
 
 setSubmitting(true);
 
@@ -138,7 +147,7 @@ try {
   );
 
   setSuccess(
-    response.data.message || "Stock added successfully."
+    response.data.message || "Branch stock added successfully."
   );
 
   setLastMovement(response.data.movement || null);
@@ -160,6 +169,7 @@ try {
   setSubmitting(false);
 }
 
+
 };
 
 return ( <main className="container py-4 py-lg-5"> <div className="d-flex flex-wrap justify-content-between align-items-center gap-3 mb-4"> <div> <p className="text-success fw-semibold text-uppercase small mb-1">
@@ -169,9 +179,18 @@ Inventory </p>
       <h1 className="h2 fw-bold mb-2">Stock Management</h1>
 
       <p className="text-secondary mb-0">
-        Receive stock for existing products and automatically
+        Receive stock for your assigned branch and automatically
         record who performed each addition.
       </p>
+
+      {branch && (
+        <div className="alert alert-info mt-3 mb-0">
+          <i className="bi bi-shop me-2" />
+          Managing inventory for{" "}
+          <strong>{branch.name}</strong>
+          {branch.code ? ` (${branch.code})` : ""}.
+        </div>
+      )}
     </div>
 
     <button
@@ -209,41 +228,39 @@ Inventory </p>
 
         <div className="row g-3">
           <div className="col-6 col-md-3">
-            <div className="small text-secondary">
-              Product
-            </div>
+            <div className="small text-secondary">Product</div>
             <div className="fw-semibold">
               {lastMovement.product_name}
             </div>
           </div>
 
           <div className="col-6 col-md-3">
-            <div className="small text-secondary">
-              Previous Stock
-            </div>
+            <div className="small text-secondary">Previous Stock</div>
             <div className="fw-semibold">
               {lastMovement.previous_stock}
             </div>
           </div>
 
           <div className="col-6 col-md-3">
-            <div className="small text-secondary">
-              Quantity Added
-            </div>
+            <div className="small text-secondary">Quantity Added</div>
             <div className="fw-semibold text-success">
               +{lastMovement.quantity_added}
             </div>
           </div>
 
           <div className="col-6 col-md-3">
-            <div className="small text-secondary">
-              New Stock
-            </div>
+            <div className="small text-secondary">New Stock</div>
             <div className="fw-semibold">
               {lastMovement.new_stock}
             </div>
           </div>
         </div>
+
+        {branch && (
+          <p className="small text-secondary mt-3 mb-0">
+            Branch: {branch.name}
+          </p>
+        )}
       </div>
     </div>
   )}
@@ -269,13 +286,19 @@ Inventory </p>
               </div>
 
               <p className="text-secondary mt-3 mb-0">
-                Loading your inventory...
+                Loading your branch inventory...
               </p>
+            </div>
+          ) : !branch ? (
+            <div className="alert alert-warning mb-0">
+              <i className="bi bi-exclamation-triangle me-2" />
+              Your account does not have an active assigned branch.
+              Please contact an administrator before managing stock.
             </div>
           ) : products.length === 0 ? (
             <div className="alert alert-info mb-0">
-              No active products were found. Ask an
-              administrator to check the product inventory.
+              No active products were found. Ask an administrator
+              to check the product inventory.
             </div>
           ) : (
             <form onSubmit={handleSubmit}>
@@ -299,12 +322,9 @@ Inventory </p>
                   <option value="">Select a product</option>
 
                   {products.map((product) => (
-                    <option
-                      key={product.id}
-                      value={product.id}
-                    >
+                    <option key={product.id} value={product.id}>
                       {product.name} — Stock: {product.stock}{" "}
-                      {product.unit}
+                      {product.unit || ""}
                     </option>
                   ))}
                 </select>
@@ -314,20 +334,28 @@ Inventory </p>
                 <div className="rounded bg-light p-3 mb-3">
                   <div className="d-flex justify-content-between gap-3">
                     <span className="text-secondary">
-                      Current stock
+                      Current branch stock
                     </span>
+
                     <strong>
                       {selectedProduct.stock}{" "}
-                      {selectedProduct.unit}
+                      {selectedProduct.unit || ""}
                     </strong>
                   </div>
 
                   <div className="d-flex justify-content-between gap-3 mt-2">
-                    <span className="text-secondary">
-                      Category
-                    </span>
+                    <span className="text-secondary">Category</span>
+
                     <span className="fw-semibold">
                       {selectedProduct.category || "Uncategorized"}
+                    </span>
+                  </div>
+
+                  <div className="d-flex justify-content-between gap-3 mt-2">
+                    <span className="text-secondary">Branch</span>
+
+                    <span className="fw-semibold">
+                      {branch.name}
                     </span>
                   </div>
                 </div>
@@ -407,9 +435,9 @@ Inventory </p>
 
               <div className="alert alert-warning small">
                 <i className="bi bi-shield-check me-2" />
-                Your cashier account will be recorded
-                automatically. Stock and its audit record are
-                saved together.
+                Your cashier account will be recorded automatically.
+                Only your assigned branch's stock should be updated.
+                Stock and its audit record are saved together.
               </div>
 
               <button
@@ -451,16 +479,14 @@ Inventory </p>
             <li className="d-flex gap-2 mb-3">
               <i className="bi bi-check-circle-fill text-success mt-1" />
               <span>
-                Each addition is linked to the authenticated
-                cashier.
+                Each addition is linked to the authenticated cashier.
               </span>
             </li>
 
             <li className="d-flex gap-2 mb-3">
               <i className="bi bi-check-circle-fill text-success mt-1" />
               <span>
-                The previous and new stock quantities are
-                recorded.
+                Previous and new stock quantities are recorded.
               </span>
             </li>
 
@@ -489,8 +515,8 @@ Inventory </p>
           </h2>
 
           <p className="text-secondary mb-3">
-            Review previous stock additions, quantities,
-            timestamps, and references.
+            Review previous stock additions, quantities, timestamps,
+            and references.
           </p>
 
           <a
@@ -507,13 +533,15 @@ Inventory </p>
 
   <div className="card border-0 shadow-sm mt-4">
     <div className="card-body p-4">
-      <div className="d-flex justify-content-between align-items-center gap-3 mb-3">
+      <div className="d-flex flex-wrap justify-content-between align-items-center gap-3 mb-3">
         <div>
           <h2 className="h5 fw-bold mb-1">
-            Current Product Stock
+            Current Branch Stock
           </h2>
+
           <p className="text-secondary small mb-0">
-            Current inventory for active products.
+            Inventory quantities for active products at your assigned
+            branch.
           </p>
         </div>
 
@@ -524,7 +552,7 @@ Inventory </p>
 
       {loading ? (
         <p className="text-secondary mb-0">
-          Loading inventory...
+          Loading branch inventory...
         </p>
       ) : products.length === 0 ? (
         <p className="text-secondary mb-0">
@@ -545,9 +573,7 @@ Inventory </p>
             <tbody>
               {products.map((product) => (
                 <tr key={product.id}>
-                  <td className="fw-semibold">
-                    {product.name}
-                  </td>
+                  <td className="fw-semibold">{product.name}</td>
 
                   <td>{product.category || "—"}</td>
 

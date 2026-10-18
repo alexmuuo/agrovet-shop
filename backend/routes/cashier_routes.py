@@ -12,6 +12,8 @@ from models.order import Order, OrderItem
 from models.product import Product
 from models.notification import Notification
 from models.stock_movement import StockMovement
+from models.branch import Branch
+from models.branch_product_stock import BranchProductStock
 
 from admin_auth import admin_required
 
@@ -258,6 +260,25 @@ def get_current_cashier():
         "cashier": g.cashier.to_dict(),
     }), 200
 
+def get_active_cashier_branch(cashier):
+    """
+    Return the cashier's assigned active branch.
+
+    A cashier without an active assigned branch must not
+    access or modify branch inventory.
+    """
+    if cashier is None or not cashier.is_active:
+        return None
+
+    if cashier.branch_id is None:
+        return None
+
+    return db.session.execute(
+        select(Branch).where(
+            Branch.id == cashier.branch_id,
+            Branch.is_active.is_(True),
+        )
+    ).scalar_one_or_none()
 
 # ============================================================
 # STOCK PRODUCTS
@@ -269,48 +290,85 @@ def get_current_cashier():
 @cashier_required
 def get_stock_products():
     """
-    Return existing active products that can be restocked.
+    Return active products with quantities for the authenticated
+    cashier's assigned branch.
 
-    Buying prices and other internal financial information
-    are deliberately excluded from this response.
+    Global Product.stock is deliberately not used as branch stock.
+    Products without a branch-stock record are returned with zero
+    quantity so they can be configured through stock addition.
     """
-
     try:
-        products = Product.query.filter(
-            Product.is_active.is_(True)
-        ).order_by(
-            Product.name.asc(),
-            Product.id.asc(),
+        cashier = db.session.get(Cashier, g.cashier.id)
+
+        if cashier is None or not cashier.is_active:
+            return jsonify({
+                "status": "error",
+                "message": "This cashier account is inactive or unavailable.",
+            }), 403
+
+        branch = get_active_cashier_branch(cashier)
+
+        if branch is None:
+            return jsonify({
+                "status": "error",
+                "message": (
+                    "Your cashier account has no active assigned branch. "
+                    "Please ask an administrator to assign you to a branch."
+                ),
+            }), 403
+
+        rows = db.session.execute(
+            select(Product, BranchProductStock.quantity)
+            .outerjoin(
+                BranchProductStock,
+                (
+                    BranchProductStock.product_id == Product.id
+                ) & (
+                    BranchProductStock.branch_id == branch.id
+                ),
+            )
+            .where(Product.is_active.is_(True))
+            .order_by(Product.name.asc(), Product.id.asc())
         ).all()
+
+        products = []
+
+        for product, branch_quantity in rows:
+            products.append({
+                "id": product.id,
+                "name": product.name,
+                "category": product.category,
+                "unit": product.unit,
+                "stock": (
+                    branch_quantity
+                    if branch_quantity is not None
+                    else 0
+                ),
+                "image": product.image,
+            })
 
         return jsonify({
             "status": "success",
+            "branch": {
+                "id": branch.id,
+                "name": branch.name,
+                "code": branch.code,
+            },
             "count": len(products),
-            "products": [
-                {
-                    "id": product.id,
-                    "name": product.name,
-                    "category": product.category,
-                    "unit": product.unit,
-                    "stock": product.stock,
-                    "image": product.image,
-                }
-                for product in products
-            ],
+            "products": products,
         }), 200
 
     except Exception:
         db.session.rollback()
 
         logger.exception(
-            "Unable to retrieve stock products for cashier."
+            "Unable to retrieve branch stock products for cashier."
         )
 
         return jsonify({
             "status": "error",
-            "message": "Unable to load products right now.",
+            "message": "Unable to load branch inventory right now.",
         }), 500
-
 
 # ============================================================
 # ADD STOCK
@@ -322,18 +380,13 @@ def get_stock_products():
 @cashier_required
 def add_cashier_stock():
     """
-    Increase stock for an existing product and record an audit
-    entry tied to the authenticated cashier.
+    Add stock to the authenticated cashier's assigned branch.
 
-    JSON body:
-        product_id: integer
-        quantity: positive integer
-        reference: optional string
-        notes: optional string
+    The branch inventory update and stock movement audit entry
+    are committed in the same database transaction.
 
-    Product stock and its audit entry are committed together.
+    Product.stock is not modified.
     """
-
     data = request.get_json(silent=True)
 
     if not isinstance(data, dict):
@@ -362,9 +415,7 @@ def add_cashier_stock():
     ):
         return jsonify({
             "status": "error",
-            "message": (
-                "Quantity must be a positive whole number."
-            ),
+            "message": "Quantity must be a positive whole number.",
         }), 400
 
     if quantity > 1_000_000:
@@ -410,10 +461,11 @@ def add_cashier_stock():
         }), 400
 
     try:
-        cashier = db.session.get(
-            Cashier,
-            g.cashier.id,
-        )
+        cashier = db.session.execute(
+            select(Cashier)
+            .where(Cashier.id == g.cashier.id)
+            .with_for_update()
+        ).scalar_one_or_none()
 
         if cashier is None or not cashier.is_active:
             db.session.rollback()
@@ -422,6 +474,19 @@ def add_cashier_stock():
                 "status": "error",
                 "message": (
                     "This cashier account is inactive or unavailable."
+                ),
+            }), 403
+
+        branch = get_active_cashier_branch(cashier)
+
+        if branch is None:
+            db.session.rollback()
+
+            return jsonify({
+                "status": "error",
+                "message": (
+                    "Your cashier account has no active assigned branch. "
+                    "Please ask an administrator to assign you to a branch."
                 ),
             }), 403
 
@@ -449,7 +514,28 @@ def add_cashier_stock():
                 ),
             }), 409
 
-        previous_stock = product.stock
+        branch_stock = db.session.execute(
+            select(BranchProductStock)
+            .where(
+                BranchProductStock.branch_id == branch.id,
+                BranchProductStock.product_id == product.id,
+            )
+            .with_for_update()
+        ).scalar_one_or_none()
+
+        # Create an inventory row when this product has not yet
+        # been configured for the cashier's branch.
+        if branch_stock is None:
+            branch_stock = BranchProductStock(
+                branch_id=branch.id,
+                product_id=product.id,
+                quantity=0,
+            )
+
+            db.session.add(branch_stock)
+            db.session.flush()
+
+        previous_stock = branch_stock.quantity
 
         if (
             isinstance(previous_stock, bool)
@@ -461,7 +547,7 @@ def add_cashier_stock():
             return jsonify({
                 "status": "error",
                 "message": (
-                    "The product has an invalid stock value. "
+                    "The branch has an invalid stock value. "
                     "Please contact an administrator."
                 ),
             }), 409
@@ -478,7 +564,8 @@ def add_cashier_stock():
                 ),
             }), 400
 
-        product.stock = new_stock
+        # Update only the assigned branch's inventory.
+        branch_stock.quantity = new_stock
 
         movement = StockMovement(
             cashier_id=cashier.id,
@@ -494,32 +581,42 @@ def add_cashier_stock():
         db.session.add(movement)
         db.session.flush()
 
+        movement_data = serialize_stock_movement(movement)
+
         result = {
             "product": {
                 "id": product.id,
                 "name": product.name,
-                "stock": product.stock,
+                "stock": branch_stock.quantity,
                 "unit": product.unit,
             },
-            "movement": serialize_stock_movement(movement),
+            "branch": {
+                "id": branch.id,
+                "name": branch.name,
+                "code": branch.code,
+            },
+            "movement": movement_data,
         }
 
         db.session.commit()
 
         logger.info(
-            "Cashier %s (ID %s) added %s units to product %s (ID %s).",
+            "Cashier %s (ID %s) added %s units to product %s "
+            "(ID %s), branch %s (ID %s).",
             cashier.username,
             cashier.id,
             quantity,
             product.name,
             product.id,
+            branch.name,
+            branch.id,
         )
 
         return jsonify({
             "status": "success",
             "message": (
                 f"Added {quantity} {product.unit} "
-                f"to {product.name} successfully."
+                f"to {product.name} at {branch.name} successfully."
             ),
             **result,
         }), 201
@@ -528,14 +625,15 @@ def add_cashier_stock():
         db.session.rollback()
 
         logger.exception(
-            "Stock addition violated a database constraint."
+            "Branch stock addition violated a database constraint."
         )
 
         return jsonify({
             "status": "error",
             "message": (
-                "Stock could not be added because a database "
-                "constraint was not satisfied."
+                "Stock could not be added because of a database "
+                "constraint or a concurrent inventory update. "
+                "Refresh the inventory and try again."
             ),
         }), 409
 
@@ -543,7 +641,7 @@ def add_cashier_stock():
         db.session.rollback()
 
         logger.exception(
-            "Cashier stock addition failed."
+            "Cashier branch stock addition failed."
         )
 
         return jsonify({
@@ -553,8 +651,6 @@ def add_cashier_stock():
                 "No changes have been committed."
             ),
         }), 500
-
-
 # ============================================================
 # CASHIER STOCK HISTORY
 # GET /api/cashier/stock/history
