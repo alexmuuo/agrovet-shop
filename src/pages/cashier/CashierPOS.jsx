@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+
 import { useNavigate } from "react-router-dom";
 import api from "../../api/api";
 
@@ -17,8 +24,8 @@ function CashierPOS() {
   const [receipt, setReceipt] = useState(null);
 
   const pollingRef = useRef(false);
-  const pollingOrderRef = useRef(null);
-  const mountedRef = useRef(true);
+  const pollingSaleRef = useRef(null);
+  const mountedRef = useRef(false);
 
   const cashier = useMemo(() => {
     try {
@@ -29,7 +36,7 @@ function CashierPOS() {
   }, []);
 
   // ============================================================
-  // CLEANUP
+  // LIFECYCLE
   // ============================================================
 
   useEffect(() => {
@@ -42,27 +49,54 @@ function CashierPOS() {
   }, []);
 
   // ============================================================
-  // LOAD PRODUCTS
+  // LOAD PRODUCTS FOR THE AUTHENTICATED CASHIER'S BRANCH
   // ============================================================
 
   const fetchProducts = useCallback(async () => {
-    const response = await api.get("/products");
+    // IMPORTANT:
+    // Do not use /products here. That is the global catalogue.
+    // This endpoint must return only products assigned to the
+    // authenticated cashier's branch.
+    const response = await api.get("/cashier/stock/products");
+
     const data = response.data;
 
     const productList = Array.isArray(data)
       ? data
       : Array.isArray(data?.products)
-      ? data.products
-      : Array.isArray(data?.items)
-      ? data.items
-      : null;
+        ? data.products
+        : Array.isArray(data?.items)
+          ? data.items
+          : null;
 
     if (!productList) {
-      throw new Error("The products API returned an unexpected response.");
+      throw new Error(
+        "The branch stock API returned an unexpected response."
+      );
     }
 
+    const normalizedProducts = productList.map((product) => {
+      const branchQuantity =
+        product.stock_quantity ??
+        product.quantity_in_stock ??
+        product.branch_stock ??
+        product.quantity ??
+        product.stock ??
+        null;
+
+      return {
+        ...product,
+        stock_quantity:
+          branchQuantity === null ||
+          branchQuantity === undefined ||
+          branchQuantity === ""
+            ? null
+            : Number(branchQuantity),
+      };
+    });
+
     if (mountedRef.current) {
-      setProducts(productList);
+      setProducts(normalizedProducts);
     }
   }, []);
 
@@ -74,31 +108,14 @@ function CashierPOS() {
         setLoading(true);
         setError("");
 
-        const response = await api.get("/products");
-        const data = response.data;
-
-        const productList = Array.isArray(data)
-          ? data
-          : Array.isArray(data?.products)
-          ? data.products
-          : Array.isArray(data?.items)
-          ? data.items
-          : null;
-
-        if (!productList) {
-          throw new Error("The products API returned an unexpected response.");
-        }
-
-        if (active) {
-          setProducts(productList);
-        }
+        await fetchProducts();
       } catch (err) {
         if (active) {
           setError(
             err.response?.data?.message ||
               err.response?.data?.error ||
               err.message ||
-              "Unable to load products."
+              "Unable to load branch products."
           );
         }
       } finally {
@@ -113,16 +130,18 @@ function CashierPOS() {
     return () => {
       active = false;
     };
-  }, []);
+  }, [fetchProducts]);
 
   // ============================================================
-  // SEARCH PRODUCTS
+  // SEARCH
   // ============================================================
 
   const filteredProducts = useMemo(() => {
     const term = search.trim().toLowerCase();
 
-    if (!term) return products;
+    if (!term) {
+      return products;
+    }
 
     return products.filter((product) => {
       const name = String(product.name || "").toLowerCase();
@@ -138,59 +157,67 @@ function CashierPOS() {
   }, [products, search]);
 
   // ============================================================
-  // PRODUCT PRICE
+  // PRICE AND BRANCH STOCK
   // ============================================================
 
   const getPrice = (product) => {
     const price = Number(product.price);
+
     return Number.isFinite(price) && price >= 0 ? price : 0;
   };
 
-  // ============================================================
-  // AVAILABLE STOCK
-  // ============================================================
-
   const getStock = (product) => {
-    const stockValue =
+    const value =
       product.stock_quantity ??
       product.quantity_in_stock ??
-      product.stock ??
-      product.quantity;
+      product.branch_stock ??
+      product.quantity ??
+      product.stock;
 
-    if (
-      stockValue === undefined ||
-      stockValue === null ||
-      stockValue === ""
-    ) {
+    if (value === undefined || value === null || value === "") {
       return null;
     }
 
-    const stock = Number(stockValue);
+    const quantity = Number(value);
 
-    return Number.isFinite(stock) && stock >= 0 ? stock : null;
+    return Number.isFinite(quantity) && quantity >= 0
+      ? quantity
+      : null;
   };
 
   // ============================================================
-  // ADD PRODUCT TO CART
+  // CART
   // ============================================================
 
   const addToCart = (product) => {
-    setMessage("");
     setError("");
+    setMessage("");
 
     const stock = getStock(product);
 
-    if (stock === 0) {
-      setError(`${product.name} is out of stock.`);
+    if (stock === null) {
+      setError(
+        `The branch stock quantity for ${product.name} is unavailable. Refresh the products before selling.`
+      );
+      return;
+    }
+
+    if (stock <= 0) {
+      setError(`${product.name} is out of stock at your branch.`);
       return;
     }
 
     setCart((currentCart) => {
-      const existing = currentCart.find((item) => item.id === product.id);
+      const existing = currentCart.find(
+        (item) => item.id === product.id
+      );
 
       if (existing) {
-        if (stock !== null && existing.quantity >= stock) {
-          setError(`Only ${stock} units of ${product.name} are available.`);
+        if (existing.quantity >= stock) {
+          setError(
+            `Only ${stock} units of ${product.name} are available at your branch.`
+          );
+
           return currentCart;
         }
 
@@ -205,19 +232,11 @@ function CashierPOS() {
     });
   };
 
-  // ============================================================
-  // REMOVE PRODUCT
-  // ============================================================
-
   const removeFromCart = (productId) => {
     setCart((currentCart) =>
       currentCart.filter((item) => item.id !== productId)
     );
   };
-
-  // ============================================================
-  // UPDATE QUANTITY
-  // ============================================================
 
   const updateQuantity = (productId, quantity) => {
     setError("");
@@ -225,7 +244,9 @@ function CashierPOS() {
 
     const product = products.find((item) => item.id === productId);
 
-    if (!product) return;
+    if (!product) {
+      return;
+    }
 
     if (quantity <= 0) {
       removeFromCart(productId);
@@ -234,8 +255,15 @@ function CashierPOS() {
 
     const stock = getStock(product);
 
-    if (stock !== null && quantity > stock) {
-      setError(`Only ${stock} units of ${product.name} are available.`);
+    if (stock === null) {
+      setError(`Unable to verify branch stock for ${product.name}.`);
+      return;
+    }
+
+    if (quantity > stock) {
+      setError(
+        `Only ${stock} units of ${product.name} are available at your branch.`
+      );
       return;
     }
 
@@ -245,10 +273,6 @@ function CashierPOS() {
       )
     );
   };
-
-  // ============================================================
-  // CLEAR CART
-  // ============================================================
 
   const clearCart = () => {
     setCart([]);
@@ -260,16 +284,15 @@ function CashierPOS() {
   // TOTALS
   // ============================================================
 
-  const totalItems = cart.reduce((total, item) => total + item.quantity, 0);
+  const totalItems = cart.reduce(
+    (total, item) => total + item.quantity,
+    0
+  );
 
   const totalAmount = cart.reduce(
     (total, item) => total + getPrice(item) * item.quantity,
     0
   );
-
-  // ============================================================
-  // CURRENCY FORMATTER
-  // ============================================================
 
   const formatCurrency = (value) =>
     Number(value || 0).toLocaleString("en-KE", {
@@ -278,137 +301,177 @@ function CashierPOS() {
     });
 
   // ============================================================
-  // AUTOMATIC M-PESA PAYMENT STATUS POLLING
+  // M-PESA PAYMENT STATUS POLLING
   // ============================================================
 
-  const pollPaymentStatus = useCallback(async (orderId) => {
-    if (!orderId || pollingRef.current) return;
+  const pollPaymentStatus = useCallback(
+    async (saleId) => {
+      if (!saleId || pollingRef.current) {
+        return;
+      }
 
-    pollingRef.current = true;
-    pollingOrderRef.current = orderId;
+      pollingRef.current = true;
+      pollingSaleRef.current = saleId;
 
-    const startedAt = Date.now();
-    const timeoutMs = 180000;
-    const intervalMs = 3000;
+      const startedAt = Date.now();
+      const timeoutMs = 180000;
+      const intervalMs = 3000;
 
-    try {
-      while (
-        mountedRef.current &&
-        pollingRef.current &&
-        Date.now() - startedAt < timeoutMs
-      ) {
-        try {
-          const response = await api.get(
-            `/cashier/sales/${orderId}/payment-status`
+      try {
+        while (
+          mountedRef.current &&
+          pollingRef.current &&
+          Date.now() - startedAt < timeoutMs
+        ) {
+          try {
+            const response = await api.get(
+              `/cashier/sales/${saleId}/payment-status`
+            );
+
+            if (!mountedRef.current || !pollingRef.current) {
+              return;
+            }
+
+            const data = response.data || {};
+
+            const transactionStatus = String(
+              data.transaction_status || ""
+            ).toLowerCase();
+
+            const paymentStatus = String(
+              data.payment_status || ""
+            ).toLowerCase();
+
+            const saleStatus = String(
+              data.sale_status || ""
+            ).toLowerCase();
+
+            const isPaid =
+              paymentStatus === "paid" ||
+              transactionStatus === "paid" ||
+              transactionStatus === "success" ||
+              transactionStatus === "successful";
+
+            const isFailed =
+              transactionStatus === "failed" ||
+              transactionStatus === "cancelled" ||
+              transactionStatus === "canceled" ||
+              paymentStatus === "failed" ||
+              saleStatus === "cancelled" ||
+              saleStatus === "canceled";
+
+            if (isPaid) {
+              setReceipt((current) => {
+                if (
+                  !current ||
+                  Number(current.id) !== Number(saleId)
+                ) {
+                  return current;
+                }
+
+                return {
+                  ...current,
+                  payment_status: "paid",
+                  status: data.sale_status || "completed",
+                  mpesa_receipt_number:
+                    data.mpesa_receipt_number ||
+                    current.mpesa_receipt_number,
+                  checkout_request_id:
+                    data.checkout_request_id ||
+                    current.checkout_request_id,
+                  mpesa_phone:
+                    data.phone_number || current.mpesa_phone,
+                };
+              });
+
+              setMessage(
+                data.mpesa_receipt_number
+                  ? `M-Pesa payment confirmed. Receipt: ${data.mpesa_receipt_number}`
+                  : "M-Pesa payment confirmed successfully."
+              );
+
+              try {
+                await fetchProducts();
+              } catch (refreshError) {
+                console.error(
+                  "Payment confirmed, but branch stock refresh failed:",
+                  refreshError
+                );
+              }
+
+              return;
+            }
+
+            if (isFailed) {
+              setReceipt((current) => {
+                if (
+                  !current ||
+                  Number(current.id) !== Number(saleId)
+                ) {
+                  return current;
+                }
+
+                return {
+                  ...current,
+                  payment_status: "failed",
+                  status: data.sale_status || "cancelled",
+                  payment_message:
+                    data.message ||
+                    "The M-Pesa payment was not completed.",
+                };
+              });
+
+              setError(
+                data.message ||
+                  "M-Pesa payment failed or was cancelled. Check Sales History before retrying."
+              );
+
+              try {
+                await fetchProducts();
+              } catch (refreshError) {
+                console.error(
+                  "Unable to refresh branch stock:",
+                  refreshError
+                );
+              }
+
+              return;
+            }
+          } catch (err) {
+            // A temporary network error is not proof of payment failure.
+            console.error(
+              "Unable to check cashier M-Pesa payment status:",
+              err
+            );
+          }
+
+          await new Promise((resolve) =>
+            setTimeout(resolve, intervalMs)
           );
-
-          if (!mountedRef.current || !pollingRef.current) return;
-
-          const data = response.data || {};
-          const transactionStatus = String(
-            data.transaction_status || ""
-          ).toLowerCase();
-
-          const orderStatus = String(data.order_status || "").toLowerCase();
-          const paymentStatus = String(data.payment_status || "").toLowerCase();
-
-          const isPaid =
-            paymentStatus === "paid" ||
-            transactionStatus === "paid" ||
-            transactionStatus === "success" ||
-            transactionStatus === "successful";
-
-          const isFailed =
-            transactionStatus === "failed" ||
-            transactionStatus === "cancelled" ||
-            transactionStatus === "canceled" ||
-            orderStatus === "cancelled" ||
-            orderStatus === "canceled" ||
-            paymentStatus === "failed";
-
-          if (isPaid) {
-            setReceipt((current) => {
-              if (!current || Number(current.id) !== Number(orderId)) {
-                return current;
-              }
-
-              return {
-                ...current,
-                payment_status: "paid",
-                order_status: data.order_status || "completed",
-                mpesa_receipt_number:
-                  data.mpesa_receipt_number || current.mpesa_receipt_number,
-                checkout_request_id:
-                  data.checkout_request_id || current.checkout_request_id,
-              };
-            });
-
-            setMessage(
-              data.mpesa_receipt_number
-                ? `M-Pesa payment confirmed. Receipt: ${data.mpesa_receipt_number}`
-                : "M-Pesa payment confirmed successfully."
-            );
-
-            try {
-              await fetchProducts();
-            } catch {
-              // Payment is confirmed even if refreshing inventory fails.
-            }
-
-            return;
-          }
-
-          if (isFailed) {
-            setReceipt((current) => {
-              if (!current || Number(current.id) !== Number(orderId)) {
-                return current;
-              }
-
-              return {
-                ...current,
-                payment_status: "failed",
-                order_status: data.order_status || "cancelled",
-                payment_message:
-                  data.message || "The M-Pesa payment was not completed.",
-              };
-            });
-
-            setError(
-              data.message ||
-                "M-Pesa payment failed or was cancelled. Check Sales History before taking further action."
-            );
-
-            try {
-              await fetchProducts();
-            } catch {
-              // Preserve the payment status even if inventory refresh fails.
-            }
-
-            return;
-          }
-        } catch (err) {
-          // A temporary network error should not mark a payment as failed.
-          console.error("Unable to check M-Pesa payment status:", err);
         }
 
-        await new Promise((resolve) => setTimeout(resolve, intervalMs));
+        if (
+          mountedRef.current &&
+          Number(pollingSaleRef.current) === Number(saleId)
+        ) {
+          setMessage(
+            "Payment is still awaiting confirmation. Keep the sale number and check Sales History before retrying."
+          );
+        }
+      } finally {
+        if (
+          Number(pollingSaleRef.current) === Number(saleId)
+        ) {
+          pollingRef.current = false;
+          pollingSaleRef.current = null;
+        }
       }
-
-      if (mountedRef.current && pollingOrderRef.current === orderId) {
-        setMessage(
-          "Payment is still awaiting confirmation. Keep this order number and check Sales History before retrying."
-        );
-      }
-    } finally {
-      if (pollingOrderRef.current === orderId) {
-        pollingRef.current = false;
-        pollingOrderRef.current = null;
-      }
-    }
-  }, [fetchProducts]);
+    },
+    [fetchProducts]
+  );
 
   // ============================================================
-  // COMPLETE SALE
+  // CHECKOUT
   // ============================================================
 
   const handleCheckout = async () => {
@@ -417,7 +480,9 @@ function CashierPOS() {
       return;
     }
 
-    if (checkoutLoading) return;
+    if (checkoutLoading) {
+      return;
+    }
 
     setError("");
     setMessage("");
@@ -425,29 +490,36 @@ function CashierPOS() {
     let normalizedPhone = "";
 
     if (paymentMethod === "mpesa") {
-      normalizedPhone = mpesaPhone.trim().replace(/[\s-]/g, "");
+      normalizedPhone = mpesaPhone
+        .trim()
+        .replace(/[\s-]/g, "");
 
-      const validPhone = /^(?:\+254|254|0)?(?:7|1)\d{8}$/.test(
-        normalizedPhone
-      );
+      const validPhone =
+        /^(?:\+254|254|0)?(?:7|1)\d{8}$/.test(normalizedPhone);
 
       if (!validPhone) {
-        setError("Enter a valid Kenyan phone number, e.g. 0712345678.");
+        setError(
+          "Enter a valid Kenyan phone number, e.g. 0712345678."
+        );
         return;
       }
 
       if (pollingRef.current) {
-        setError("A payment is already being checked. Please wait.");
+        setError(
+          "A payment is already being checked. Please wait."
+        );
         return;
       }
     }
 
     setCheckoutLoading(true);
 
-    let orderCreated = false;
+    let saleCreated = false;
 
     try {
-      // STEP 1: CREATE SALE
+      // --------------------------------------------------------
+      // STEP 1: CREATE AN INDEPENDENT CASHIER SALE
+      // --------------------------------------------------------
 
       const payload = {
         payment_method: paymentMethod,
@@ -457,24 +529,34 @@ function CashierPOS() {
         })),
       };
 
-      const response = await api.post("/cashier/sales", payload);
-      const order = response.data?.order;
+      const response = await api.post(
+        "/cashier/sales",
+        payload
+      );
 
-      if (!order || !order.id || !order.order_number) {
+      // The backend returns "sale", NOT "order".
+      const sale = response.data?.sale;
+
+      if (!sale || !sale.id || !sale.sale_number) {
         throw new Error(
           "The sale response was incomplete. Check Sales History before retrying."
         );
       }
 
-      orderCreated = true;
+      saleCreated = true;
 
+      // --------------------------------------------------------
       // STEP 2: CASH PAYMENT
+      // --------------------------------------------------------
 
       if (paymentMethod === "cash") {
         setReceipt({
-          ...order,
+          ...sale,
+          id: sale.id,
+          order_number: sale.sale_number,
           payment_method: "cash",
-          payment_status: "paid",
+          payment_status: sale.payment_status || "paid",
+          items: sale.items || [],
         });
 
         setCart([]);
@@ -485,37 +567,45 @@ function CashierPOS() {
           await fetchProducts();
         } catch {
           setMessage(
-            "Cash sale recorded successfully. Refresh the page to update inventory."
+            "Cash sale recorded successfully. Refresh the page to update branch inventory."
           );
         }
 
         return;
       }
 
-      // STEP 3: INITIATE M-PESA STK PUSH
+      // --------------------------------------------------------
+      // STEP 3: INITIATE M-PESA FOR THE CASHIER SALE
+      // --------------------------------------------------------
 
-      const stkResponse = await api.post("/payments/stk-push", {
-        order_id: order.id,
-        phone: normalizedPhone,
-      });
+      const stkResponse = await api.post(
+        "/payments/cashier-stk-push",
+        {
+          sale_id: sale.id,
+          phone: normalizedPhone,
+        }
+      );
 
       const paymentData = stkResponse.data || {};
 
-      // STEP 4: SHOW PENDING RECEIPT
-
       setReceipt({
-        ...order,
+        ...sale,
+        id: sale.id,
+        order_number: sale.sale_number,
         payment_method: "mpesa",
         payment_status: paymentData.payment_status || "pending",
-        checkout_request_id: paymentData.checkout_request_id || null,
+        checkout_request_id:
+          paymentData.checkout_request_id || null,
         mpesa_phone: normalizedPhone,
         mpesa_receipt_number: null,
+        items: sale.items || [],
       });
 
       setCart([]);
       setSearch("");
+
       setMessage(
-        "M-Pesa prompt initiated. Ask the customer to check their phone and enter their PIN. Payment confirmation will be checked automatically."
+        "M-Pesa prompt initiated. Ask the customer to enter their PIN. The POS will check payment confirmation automatically."
       );
 
       try {
@@ -524,9 +614,11 @@ function CashierPOS() {
         // Do not interrupt payment confirmation if stock refresh fails.
       }
 
-      // STEP 5: CHECK PAYMENT STATUS AUTOMATICALLY
+      // --------------------------------------------------------
+      // STEP 4: CHECK PAYMENT STATUS
+      // --------------------------------------------------------
 
-      void pollPaymentStatus(order.id);
+      void pollPaymentStatus(sale.id);
     } catch (err) {
       const serverMessage =
         err.response?.data?.error ||
@@ -534,19 +626,19 @@ function CashierPOS() {
         err.message ||
         "Checkout failed.";
 
-      if (orderCreated) {
+      if (saleCreated) {
         setError(
-          `${serverMessage} An order has already been created. Check Sales History and payment status before retrying.`
+          `${serverMessage} A sale has already been created. Check Sales History and payment status before retrying.`
         );
 
         setMessage(
-          "The sale order exists, but payment initiation was not confirmed. Do not create the same sale again."
+          "The sale exists, but payment initiation was not confirmed. Do not create the same sale again."
         );
 
         try {
           await fetchProducts();
         } catch {
-          // Preserve the original checkout error.
+          // Preserve the original error.
         }
       } else {
         setError(serverMessage);
@@ -564,6 +656,7 @@ function CashierPOS() {
 
   const handleLogout = () => {
     pollingRef.current = false;
+    pollingSaleRef.current = null;
 
     localStorage.removeItem("cashierToken");
     localStorage.removeItem("cashier");
@@ -591,7 +684,8 @@ function CashierPOS() {
           </p>
 
           <p>
-            <strong>Receipt:</strong> {receipt.order_number}
+            <strong>Receipt:</strong>{" "}
+            {receipt.sale_number || receipt.order_number}
           </p>
 
           <p>
@@ -605,26 +699,44 @@ function CashierPOS() {
             <strong>Cashier:</strong>{" "}
             {cashier?.full_name || cashier?.username || "Cashier"}
           </p>
+
+          {receipt.branch_name && (
+            <p>
+              <strong>Branch:</strong> {receipt.branch_name}
+            </p>
+          )}
         </div>
 
         <hr />
 
-        {(receipt.items || []).map((item, index) => (
-          <div
-            key={item.id || `${item.product_id}-${index}`}
-            className="pos-receipt-item"
-          >
-            <div>
-              <strong>{item.product_name || "Product"}</strong>
+        {(receipt.items || []).map((item, index) => {
+          const itemPrice = Number(item.price || 0);
+          const quantity = Number(item.quantity || 0);
+          const subtotal = Number(
+            item.subtotal ?? itemPrice * quantity
+          );
 
-              <div className="pos-receipt-muted">
-                {item.quantity} × KSh {formatCurrency(item.price)}
+          return (
+            <div
+              key={item.id || `${item.product_id}-${index}`}
+              className="pos-receipt-item"
+            >
+              <div>
+                <strong>
+                  {item.product_name ||
+                    item.product?.name ||
+                    "Product"}
+                </strong>
+
+                <div className="pos-receipt-muted">
+                  {quantity} × KSh {formatCurrency(itemPrice)}
+                </div>
               </div>
-            </div>
 
-            <strong>KSh {formatCurrency(item.subtotal)}</strong>
-          </div>
-        ))}
+              <strong>KSh {formatCurrency(subtotal)}</strong>
+            </div>
+          );
+        })}
 
         <div className="pos-receipt-total">
           <strong>Total</strong>
@@ -645,7 +757,9 @@ function CashierPOS() {
           <>
             <p>
               <strong>Phone:</strong>{" "}
-              {receipt.mpesa_phone || receipt.phone_number || "Not available"}
+              {receipt.mpesa_phone ||
+                receipt.phone_number ||
+                "Not available"}
             </p>
 
             {receipt.mpesa_receipt_number && (
@@ -671,8 +785,8 @@ function CashierPOS() {
             <div className="pos-receipt-warning">
               <strong>Payment not yet confirmed.</strong>
               <p>
-                The POS checks payment status automatically. Do not treat this
-                transaction as paid until the backend confirms success.
+                Do not treat this transaction as paid until the
+                backend confirms success.
               </p>
             </div>
           )}
@@ -690,10 +804,14 @@ function CashierPOS() {
 
         {receipt.payment_method === "mpesa" &&
           receipt.payment_status === "paid" && (
-            <p className="pos-receipt-paid">M-Pesa payment confirmed.</p>
+            <p className="pos-receipt-paid">
+              M-Pesa payment confirmed.
+            </p>
           )}
 
-        <p className="pos-receipt-thanks">Thank you for shopping with us!</p>
+        <p className="pos-receipt-thanks">
+          Thank you for shopping with us!
+        </p>
 
         <div className="pos-receipt-actions">
           <button
@@ -731,16 +849,29 @@ function CashierPOS() {
       <div className="pos-page" style={styles.page}>
         <header style={styles.header}>
           <div>
-<h1 style={{ ...styles.heading, fontStyle: "italic" }}>
-  Headmaster Liquors POS
-</h1>            <p style={styles.subheading}>Point of Sale · Counter Sales</p>
+            <h1 style={{ ...styles.heading, fontStyle: "italic" }}>
+              Headmaster Liquors POS
+            </h1>
+
+            <p style={styles.subheading}>
+              Point of Sale · Counter Sales
+            </p>
+
+            {cashier?.branch_name && (
+              <p style={styles.branchLabel}>
+                Branch: {cashier.branch_name}
+              </p>
+            )}
           </div>
 
           <div style={styles.headerRight}>
             <div style={styles.cashierInfo}>
               <span style={styles.cashierLabel}>Signed in as</span>
+
               <strong>
-                {cashier?.full_name || cashier?.username || "Cashier"}
+                {cashier?.full_name ||
+                  cashier?.username ||
+                  "Cashier"}
               </strong>
             </div>
 
@@ -779,7 +910,8 @@ function CashierPOS() {
 
           <section style={styles.productPanel}>
             <div style={styles.panelHeading}>
-              <h2 style={styles.sectionTitle}>Products</h2>
+              <h2 style={styles.sectionTitle}>Branch Products</h2>
+
               <span style={styles.countBadge}>
                 {filteredProducts.length} found
               </span>
@@ -789,18 +921,22 @@ function CashierPOS() {
               type="search"
               placeholder="Search products by name or category..."
               value={search}
-              onChange={(e) => setSearch(e.target.value)}
+              onChange={(event) => setSearch(event.target.value)}
               style={styles.search}
             />
 
             {loading ? (
-              <div style={styles.emptyState}>Loading products...</div>
+              <div style={styles.emptyState}>
+                Loading branch products...
+              </div>
             ) : filteredProducts.length === 0 ? (
               <div style={styles.emptyState}>
-                <h3>No products found</h3>
+                <h3>No branch products found</h3>
+
                 <p>
-                  Try another search or add products through the admin
-                  dashboard.
+                  No products are assigned to this branch, or your
+                  search returned no results. Contact the administrator
+                  if you expected products to appear.
                 </p>
               </div>
             ) : (
@@ -813,14 +949,16 @@ function CashierPOS() {
                   );
 
                   const unavailable =
-                    stock === 0 ||
-                    (stock !== null &&
-                      Boolean(inCart) &&
-                      inCart.quantity >= stock);
+                    stock === null ||
+                    stock <= 0 ||
+                    (Boolean(inCart) && inCart.quantity >= stock);
 
                   return (
-                    <article key={product.id} style={styles.productCard}>
-                      <div style={styles.productIcon}>🌱</div>
+                    <article
+                      key={product.id}
+                      style={styles.productCard}
+                    >
+                      <div style={styles.productIcon}>🍾</div>
 
                       <h3 style={styles.productName}>
                         {product.name || "Unnamed product"}
@@ -835,7 +973,9 @@ function CashierPOS() {
                       </p>
 
                       <p style={styles.stock}>
-                        {stock === null ? "Stock not provided" : `${stock} in stock`}
+                        {stock === null
+                          ? "Stock unavailable"
+                          : `${stock} in this branch`}
                       </p>
 
                       <button
@@ -849,13 +989,15 @@ function CashierPOS() {
                             : {}),
                         }}
                       >
-                        {stock === 0
-                          ? "Out of stock"
-                          : unavailable
-                          ? "Stock limit reached"
-                          : inCart
-                          ? "Add another"
-                          : "Add to cart"}
+                        {stock === null
+                          ? "Stock unavailable"
+                          : stock <= 0
+                            ? "Out of stock"
+                            : unavailable
+                              ? "Stock limit reached"
+                              : inCart
+                                ? "Add another"
+                                : "Add to cart"}
                       </button>
                     </article>
                   );
@@ -869,7 +1011,10 @@ function CashierPOS() {
           <aside style={styles.cartPanel}>
             <div style={styles.panelHeading}>
               <h2 style={styles.sectionTitle}>Current Sale</h2>
-              <span style={styles.countBadge}>{totalItems} items</span>
+
+              <span style={styles.countBadge}>
+                {totalItems} items
+              </span>
             </div>
 
             {cart.length === 0 ? (
@@ -883,10 +1028,15 @@ function CashierPOS() {
                 {cart.map((item) => (
                   <div key={item.id} style={styles.cartItem}>
                     <div style={styles.cartItemInfo}>
-                      <strong style={styles.cartItemName}>{item.name}</strong>
+                      <strong style={styles.cartItemName}>
+                        {item.name}
+                      </strong>
 
                       <span style={styles.cartItemPrice}>
-                        KSh {formatCurrency(getPrice(item) * item.quantity)}
+                        KSh{" "}
+                        {formatCurrency(
+                          getPrice(item) * item.quantity
+                        )}
                       </span>
 
                       <div style={styles.quantityControls}>
@@ -894,7 +1044,10 @@ function CashierPOS() {
                           type="button"
                           disabled={checkoutLoading}
                           onClick={() =>
-                            updateQuantity(item.id, item.quantity - 1)
+                            updateQuantity(
+                              item.id,
+                              item.quantity - 1
+                            )
                           }
                           style={styles.quantityButton}
                           aria-label={`Decrease ${item.name} quantity`}
@@ -902,13 +1055,18 @@ function CashierPOS() {
                           −
                         </button>
 
-                        <span style={styles.quantity}>{item.quantity}</span>
+                        <span style={styles.quantity}>
+                          {item.quantity}
+                        </span>
 
                         <button
                           type="button"
                           disabled={checkoutLoading}
                           onClick={() =>
-                            updateQuantity(item.id, item.quantity + 1)
+                            updateQuantity(
+                              item.id,
+                              item.quantity + 1
+                            )
                           }
                           style={styles.quantityButton}
                           aria-label={`Increase ${item.name} quantity`}
@@ -932,15 +1090,18 @@ function CashierPOS() {
             )}
 
             <div style={styles.summary}>
-              <label htmlFor="paymentMethod" style={styles.paymentLabel}>
+              <label
+                htmlFor="paymentMethod"
+                style={styles.paymentLabel}
+              >
                 Payment Method
               </label>
 
               <select
                 id="paymentMethod"
                 value={paymentMethod}
-                onChange={(e) => {
-                  setPaymentMethod(e.target.value);
+                onChange={(event) => {
+                  setPaymentMethod(event.target.value);
                   setError("");
                   setMessage("");
                 }}
@@ -953,7 +1114,10 @@ function CashierPOS() {
 
               {paymentMethod === "mpesa" && (
                 <div style={styles.phoneSection}>
-                  <label htmlFor="mpesaPhone" style={styles.paymentLabel}>
+                  <label
+                    htmlFor="mpesaPhone"
+                    style={styles.paymentLabel}
+                  >
                     Customer M-Pesa Phone Number
                   </label>
 
@@ -964,14 +1128,16 @@ function CashierPOS() {
                     autoComplete="tel"
                     placeholder="e.g. 0712345678"
                     value={mpesaPhone}
-                    onChange={(e) => setMpesaPhone(e.target.value)}
+                    onChange={(event) =>
+                      setMpesaPhone(event.target.value)
+                    }
                     disabled={checkoutLoading}
                     style={styles.phoneInput}
                   />
 
                   <p style={styles.phoneHint}>
-                    The customer must be able to access this phone to enter
-                    their M-Pesa PIN.
+                    The customer must be able to access this phone
+                    to enter their M-Pesa PIN.
                   </p>
                 </div>
               )}
@@ -1002,8 +1168,8 @@ function CashierPOS() {
                     ? "Initiating Payment..."
                     : "Processing Sale..."
                   : paymentMethod === "mpesa"
-                  ? "Initiate M-Pesa Payment"
-                  : "Complete Cash Sale"}
+                    ? "Initiate M-Pesa Payment"
+                    : "Complete Cash Sale"}
               </button>
 
               <button
@@ -1022,7 +1188,7 @@ function CashierPOS() {
 
               <p style={styles.notice}>
                 {paymentMethod === "mpesa"
-                  ? "M-Pesa sales remain pending until Safaricom confirms payment. Do not create the same sale again if payment initiation is uncertain."
+                  ? "M-Pesa sales remain unpaid until the backend confirms payment."
                   : "Cash sales are recorded by the backend during checkout."}
               </p>
             </div>
@@ -1116,7 +1282,6 @@ const receiptStyles = `
 }
 .pos-print-button { background: #166534; color: white; }
 .pos-new-sale-button { background: #e2e8f0; color: #1f2937; }
-
 @media print {
   body * { visibility: hidden !important; }
   .pos-receipt-overlay,
@@ -1174,16 +1339,36 @@ const styles = {
     paddingBottom: "20px",
     borderBottom: "1px solid #dce5df",
   },
-  heading: { margin: 0, color: "#166534", fontSize: "30px" },
-  subheading: { margin: "6px 0 0", color: "#64748b" },
+  heading: {
+    margin: 0,
+    color: "#166534",
+    fontSize: "30px",
+  },
+  subheading: {
+    margin: "6px 0 0",
+    color: "#64748b",
+  },
+  branchLabel: {
+    margin: "6px 0 0",
+    color: "#166534",
+    fontSize: "13px",
+    fontWeight: "600",
+  },
   headerRight: {
     display: "flex",
     alignItems: "center",
     gap: "12px",
     flexWrap: "wrap",
   },
-  cashierInfo: { display: "flex", flexDirection: "column", gap: "4px" },
-  cashierLabel: { color: "#64748b", fontSize: "12px" },
+  cashierInfo: {
+    display: "flex",
+    flexDirection: "column",
+    gap: "4px",
+  },
+  cashierLabel: {
+    color: "#64748b",
+    fontSize: "12px",
+  },
   salesHistoryButton: {
     padding: "10px 16px",
     background: "#2563eb",
@@ -1219,7 +1404,8 @@ const styles = {
   },
   layout: {
     display: "grid",
-    gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 340px), 1fr))",
+    gridTemplateColumns:
+      "repeat(auto-fit, minmax(min(100%, 340px), 1fr))",
     gap: "24px",
     alignItems: "start",
   },
@@ -1244,7 +1430,10 @@ const styles = {
     gap: "12px",
     marginBottom: "18px",
   },
-  sectionTitle: { margin: 0, fontSize: "21px" },
+  sectionTitle: {
+    margin: 0,
+    fontSize: "21px",
+  },
   countBadge: {
     padding: "5px 10px",
     background: "#dcfce7",
@@ -1265,7 +1454,8 @@ const styles = {
   },
   productGrid: {
     display: "grid",
-    gridTemplateColumns: "repeat(auto-fill, minmax(min(100%, 190px), 1fr))",
+    gridTemplateColumns:
+      "repeat(auto-fill, minmax(min(100%, 190px), 1fr))",
     gap: "16px",
   },
   productCard: {
@@ -1290,14 +1480,22 @@ const styles = {
     fontSize: "16px",
     overflowWrap: "anywhere",
   },
-  category: { margin: 0, color: "#64748b", fontSize: "13px" },
+  category: {
+    margin: 0,
+    color: "#64748b",
+    fontSize: "13px",
+  },
   price: {
     margin: "13px 0 5px",
     color: "#166534",
     fontSize: "18px",
     fontWeight: "700",
   },
-  stock: { margin: "0 0 14px", color: "#64748b", fontSize: "12px" },
+  stock: {
+    margin: "0 0 14px",
+    color: "#64748b",
+    fontSize: "12px",
+  },
   addButton: {
     width: "100%",
     marginTop: "auto",
@@ -1314,10 +1512,23 @@ const styles = {
     color: "#64748b",
     cursor: "not-allowed",
   },
-  emptyState: { padding: "40px 15px", textAlign: "center", color: "#64748b" },
-  emptyCart: { padding: "38px 12px", textAlign: "center", color: "#64748b" },
-  cartIcon: { fontSize: "38px" },
-  cartItems: { maxHeight: "440px", overflowY: "auto" },
+  emptyState: {
+    padding: "40px 15px",
+    textAlign: "center",
+    color: "#64748b",
+  },
+  emptyCart: {
+    padding: "38px 12px",
+    textAlign: "center",
+    color: "#64748b",
+  },
+  cartIcon: {
+    fontSize: "38px",
+  },
+  cartItems: {
+    maxHeight: "440px",
+    overflowY: "auto",
+  },
   cartItem: {
     display: "flex",
     justifyContent: "space-between",
@@ -1330,8 +1541,13 @@ const styles = {
     flexDirection: "column",
     gap: "8px",
   },
-  cartItemName: { overflowWrap: "anywhere" },
-  cartItemPrice: { color: "#166534", fontWeight: "600" },
+  cartItemName: {
+    overflowWrap: "anywhere",
+  },
+  cartItemPrice: {
+    color: "#166534",
+    fontWeight: "600",
+  },
   quantityControls: {
     display: "flex",
     alignItems: "center",
@@ -1347,7 +1563,11 @@ const styles = {
     cursor: "pointer",
     fontSize: "18px",
   },
-  quantity: { minWidth: "18px", textAlign: "center", fontWeight: "600" },
+  quantity: {
+    minWidth: "18px",
+    textAlign: "center",
+    fontWeight: "600",
+  },
   removeButton: {
     marginLeft: "auto",
     border: "none",
@@ -1360,7 +1580,11 @@ const styles = {
     paddingTop: "18px",
     borderTop: "1px solid #e2e8f0",
   },
-  paymentLabel: { display: "block", marginBottom: "8px", fontWeight: "600" },
+  paymentLabel: {
+    display: "block",
+    marginBottom: "8px",
+    fontWeight: "600",
+  },
   paymentSelect: {
     width: "100%",
     padding: "12px",
@@ -1371,7 +1595,9 @@ const styles = {
     fontSize: "14px",
     boxSizing: "border-box",
   },
-  phoneSection: { marginBottom: "20px" },
+  phoneSection: {
+    marginBottom: "20px",
+  },
   phoneInput: {
     width: "100%",
     padding: "12px",
@@ -1420,7 +1646,10 @@ const styles = {
     color: "#b91c1c",
     cursor: "pointer",
   },
-  disabledClearButton: { opacity: 0.5, cursor: "not-allowed" },
+  disabledClearButton: {
+    opacity: 0.5,
+    cursor: "not-allowed",
+  },
   notice: {
     marginTop: "14px",
     color: "#64748b",
