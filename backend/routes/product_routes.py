@@ -14,8 +14,7 @@ from flask import (
 )
 
 from werkzeug.utils import secure_filename
-from sqlalchemy.exc import IntegrityError
-
+from sqlalchemy import func, or_, select
 from extensions import db
 from models.product import Product
 from models.branch import Branch
