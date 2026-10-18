@@ -291,12 +291,11 @@ def get_active_cashier_branch(cashier):
 @cashier_required
 def get_stock_products():
     """
-    Return only active products assigned to the authenticated
-    cashier's branch through BranchProductStock.
+    Return active products assigned to the authenticated
+    cashier's branch.
 
-    Products assigned exclusively to another branch are excluded.
-    A product assigned to this branch with quantity zero remains
-    visible so the cashier can restock it.
+    Includes the actual product selling price and branch-specific
+    stock quantity. Never uses global Product.stock as branch stock.
     """
 
     try:
@@ -348,7 +347,19 @@ def get_stock_products():
                 "name": product.name,
                 "category": product.category,
                 "unit": product.unit,
+
+                # Actual selling price from the Product record.
+                "price": (
+                    float(product.price)
+                    if product.price is not None
+                    else None
+                ),
+
+                # Branch-specific stock, not global Product.stock.
                 "stock": branch_quantity,
+                "branch_stock": branch_quantity,
+                "stock_quantity": branch_quantity,
+
                 "image": product.image,
             })
 
