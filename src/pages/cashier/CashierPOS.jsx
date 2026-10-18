@@ -76,25 +76,44 @@ function CashierPOS() {
     }
 
     const normalizedProducts = productList.map((product) => {
-      const branchQuantity =
-        product.stock_quantity ??
-        product.quantity_in_stock ??
-        product.branch_stock ??
-        product.quantity ??
-        product.stock ??
-        null;
+  // Prefer branch-specific stock over global product stock.
+  const branchQuantity =
+    product.branch_stock ??
+    product.quantity ??
+    product.stock_quantity ??
+    product.quantity_in_stock ??
+    product.stock ??
+    null;
 
-      return {
-        ...product,
-        stock_quantity:
-          branchQuantity === null ||
-          branchQuantity === undefined ||
-          branchQuantity === ""
-            ? null
-            : Number(branchQuantity),
-      };
-    });
+  // Support different names for the product's selling price.
+  const sellingPrice =
+    product.price ??
+    product.selling_price ??
+    product.unit_price ??
+    product.retail_price ??
+    product.sale_price ??
+    null;
 
+  return {
+    ...product,
+
+    // Normalize the selling price for the POS.
+    price:
+      sellingPrice === null ||
+      sellingPrice === undefined ||
+      sellingPrice === ""
+        ? null
+        : Number(sellingPrice),
+
+    // Preserve branch-specific inventory.
+    stock_quantity:
+      branchQuantity === null ||
+      branchQuantity === undefined ||
+      branchQuantity === ""
+        ? null
+        : Number(branchQuantity),
+  };
+});
     if (mountedRef.current) {
       setProducts(normalizedProducts);
     }
@@ -161,10 +180,27 @@ function CashierPOS() {
   // ============================================================
 
   const getPrice = (product) => {
-    const price = Number(product.price);
+  const rawPrice =
+    product.price ??
+    product.selling_price ??
+    product.unit_price ??
+    product.retail_price ??
+    product.sale_price;
 
-    return Number.isFinite(price) && price >= 0 ? price : 0;
-  };
+  if (
+    rawPrice === null ||
+    rawPrice === undefined ||
+    rawPrice === ""
+  ) {
+    return 0;
+  }
+
+  const price = Number(rawPrice);
+
+  return Number.isFinite(price) && price >= 0
+    ? price
+    : 0;
+};
 
   const getStock = (product) => {
     const value =
