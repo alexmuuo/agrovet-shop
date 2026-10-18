@@ -280,6 +280,7 @@ def get_active_cashier_branch(cashier):
         )
     ).scalar_one_or_none()
 
+
 # ============================================================
 # STOCK PRODUCTS
 # GET /api/cashier/stock/products
@@ -290,20 +291,23 @@ def get_active_cashier_branch(cashier):
 @cashier_required
 def get_stock_products():
     """
-    Return active products with quantities for the authenticated
-    cashier's assigned branch.
+    Return only active products assigned to the authenticated
+    cashier's branch through BranchProductStock.
 
-    Global Product.stock is deliberately not used as branch stock.
-    Products without a branch-stock record are returned with zero
-    quantity so they can be configured through stock addition.
+    Products assigned exclusively to another branch are excluded.
+    A product assigned to this branch with quantity zero remains
+    visible so the cashier can restock it.
     """
+
     try:
         cashier = db.session.get(Cashier, g.cashier.id)
 
         if cashier is None or not cashier.is_active:
             return jsonify({
                 "status": "error",
-                "message": "This cashier account is inactive or unavailable.",
+                "message": (
+                    "This cashier account is inactive or unavailable."
+                ),
             }), 403
 
         branch = get_active_cashier_branch(cashier)
@@ -318,17 +322,22 @@ def get_stock_products():
             }), 403
 
         rows = db.session.execute(
-            select(Product, BranchProductStock.quantity)
-            .outerjoin(
-                BranchProductStock,
-                (
-                    BranchProductStock.product_id == Product.id
-                ) & (
-                    BranchProductStock.branch_id == branch.id
-                ),
+            select(
+                Product,
+                BranchProductStock.quantity,
             )
-            .where(Product.is_active.is_(True))
-            .order_by(Product.name.asc(), Product.id.asc())
+            .join(
+                BranchProductStock,
+                BranchProductStock.product_id == Product.id,
+            )
+            .where(
+                BranchProductStock.branch_id == branch.id,
+                Product.is_active.is_(True),
+            )
+            .order_by(
+                Product.name.asc(),
+                Product.id.asc(),
+            )
         ).all()
 
         products = []
@@ -339,11 +348,7 @@ def get_stock_products():
                 "name": product.name,
                 "category": product.category,
                 "unit": product.unit,
-                "stock": (
-                    branch_quantity
-                    if branch_quantity is not None
-                    else 0
-                ),
+                "stock": branch_quantity,
                 "image": product.image,
             })
 
@@ -369,6 +374,7 @@ def get_stock_products():
             "status": "error",
             "message": "Unable to load branch inventory right now.",
         }), 500
+
 
 # ============================================================
 # ADD STOCK
