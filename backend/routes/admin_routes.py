@@ -3265,3 +3265,102 @@ def get_pos_branch_report():
             "status": "error",
             "message": "Unable to generate POS branch report.",
         }), 500    
+    # ============================================================
+# ALL POS SALES — ADMIN ONLY
+#
+# GET /api/admin/pos-sales
+#
+# Retrieves cashier POS transactions from CashierSale.
+# Does NOT retrieve website Order records.
+#
+# Optional query parameters:
+#   branch_id
+#   start_date=YYYY-MM-DD
+#   end_date=YYYY-MM-DD
+# ============================================================
+
+@admin_bp.route(
+    "/api/admin/pos-sales",
+    methods=["GET"]
+)
+@admin_required
+def get_all_admin_pos_sales():
+    try:
+        query = CashierSale.query
+
+        # ----------------------------------------------------
+        # OPTIONAL BRANCH FILTER
+        # ----------------------------------------------------
+
+        branch_id = request.args.get(
+            "branch_id",
+            type=int
+        )
+
+        if branch_id is not None:
+            if branch_id <= 0:
+                return jsonify({
+                    "status": "error",
+                    "message": "Invalid branch ID."
+                }), 400
+
+            query = query.filter(
+                CashierSale.branch_id == branch_id
+            )
+
+        # ----------------------------------------------------
+        # OPTIONAL DATE FILTERS
+        # ----------------------------------------------------
+
+        try:
+            start_date, end_date = parse_report_dates()
+
+        except ValueError as error:
+            return jsonify({
+                "status": "error",
+                "message": str(error)
+            }), 400
+
+        if start_date:
+            query = query.filter(
+                CashierSale.created_at >= start_date
+            )
+
+        if end_date:
+            query = query.filter(
+                CashierSale.created_at < end_date
+            )
+
+        # ----------------------------------------------------
+        # NEWEST TRANSACTIONS FIRST
+        # ----------------------------------------------------
+
+        sales = query.order_by(
+            CashierSale.created_at.desc(),
+            CashierSale.id.desc()
+        ).all()
+
+        # ----------------------------------------------------
+        # SERIALIZE POS SALES
+        # ----------------------------------------------------
+
+        return jsonify({
+            "status": "success",
+            "sales": [
+                sale.to_dict()
+                for sale in sales
+            ],
+            "total": len(sales)
+        }), 200
+
+    except Exception:
+        db.session.rollback()
+
+        logger.exception(
+            "Failed to retrieve all admin POS sales."
+        )
+
+        return jsonify({
+            "status": "error",
+            "message": "Unable to retrieve POS sales."
+        }), 500
