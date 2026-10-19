@@ -152,10 +152,14 @@ function CashierPOS() {
           portionsPerUnit > 0
             ? portionsPerUnit
             : null,
-        allow_portion_sales:
-          product.allow_portion_sales === true ||
-          product.allow_portion_sales === 1 ||
-          product.allow_portion_sales === "true",
+        // APIs and databases may serialize booleans differently.
+        // Normalize common true values so portion sales are not hidden
+        // merely because the API returns "True", "1", or "yes".
+        allow_portion_sales: ["true", "1", "yes", "on"].includes(
+          String(product.allow_portion_sales ?? "")
+            .trim()
+            .toLowerCase()
+        ),
         stock_quantity:
           rawStock !== null &&
           Number.isFinite(rawStock) &&
@@ -240,11 +244,26 @@ function CashierPOS() {
       : null;
   };
 
-  const canSellPortions = (product) =>
-    product.allow_portion_sales === true &&
-    Number.isInteger(Number(product.portions_per_unit)) &&
-    Number(product.portions_per_unit) > 0 &&
-    getPortionPrice(product) !== null;
+  const canSellPortions = (product) => {
+    if (!product) {
+      return false;
+    }
+
+    const enabled = ["true", "1", "yes", "on"].includes(
+      String(product.allow_portion_sales ?? "")
+        .trim()
+        .toLowerCase()
+    );
+    const portionsPerUnit = Number(product.portions_per_unit);
+    const portionPrice = getPortionPrice(product);
+
+    return (
+      enabled &&
+      Number.isInteger(portionsPerUnit) &&
+      portionsPerUnit > 0 &&
+      portionPrice !== null
+    );
+  };
 
   const getStock = (product) => {
     const value =
@@ -1359,8 +1378,8 @@ function CashierPOS() {
                           : unavailable
                             ? "Out of stock"
                             : unitInCart
-                              ? "Add another "
-                              : "Add to cart"}
+                              ? "Add another whole unit"
+                              : "Add whole unit"}
                       </button>
 
                       {canPortion && (
@@ -1443,7 +1462,9 @@ function CashierPOS() {
 
                           {canSellPortions(item) && (
                             <option value="portion">
-                              Portion
+                              Portion — KSh {formatCurrency(
+                                getPortionPrice(item)
+                              )}
                             </option>
                           )}
                         </select>

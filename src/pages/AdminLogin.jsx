@@ -7,6 +7,7 @@ function AdminLogin() {
 
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
@@ -53,7 +54,7 @@ function AdminLogin() {
           <h2 className="text-center mb-2">Admin Login</h2>
 
           <p className="text-center text-muted mb-4">
-            Agrovet Management Portal
+            Headmaster liquors Management Portal
           </p>
 
           {error && (
@@ -92,17 +93,33 @@ function AdminLogin() {
                 Password
               </label>
 
-              <input
-                id="adminPassword"
-                type="password"
-                className="form-control"
-                value={password}
-                onChange={(event) =>
-                  setPassword(event.target.value)
-                }
-                autoComplete="current-password"
-                required
-              />
+              <div className="input-group">
+                <input
+                  id="adminPassword"
+                  type={showPassword ? "text" : "password"}
+                  className="form-control"
+                  value={password}
+                  onChange={(event) =>
+                    setPassword(event.target.value)
+                  }
+                  autoComplete="current-password"
+                  required
+                />
+
+                <button
+                  type="button"
+                  className="btn btn-outline-secondary"
+                  onClick={() =>
+                    setShowPassword((previous) => !previous)
+                  }
+                  aria-label={
+                    showPassword ? "Hide password" : "Show password"
+                  }
+                  aria-pressed={showPassword}
+                >
+                  {showPassword ? "🙈 Hide" : "Show"}
+                </button>
+              </div>
             </div>
 
             <button
@@ -120,3 +137,4 @@ function AdminLogin() {
 }
 
 export default AdminLogin;
+

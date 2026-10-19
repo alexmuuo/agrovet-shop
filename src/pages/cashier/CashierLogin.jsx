@@ -7,6 +7,7 @@ function CashierLogin() {
 
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
@@ -32,7 +33,6 @@ function CashierLogin() {
       localStorage.setItem("cashierToken", token);
       localStorage.setItem("cashier", JSON.stringify(cashier));
 
-      // The cashier dashboard will be implemented next.
       navigate("/cashier/pos");
     } catch (err) {
       setError(
@@ -54,7 +54,7 @@ function CashierLogin() {
         <h1 style={styles.title}>Cashier Login</h1>
 
         <p style={styles.subtitle}>
-          Sign in to access the agrovet point-of-sale system.
+          Sign in to access the point-of-sale system.
         </p>
 
         {error && <div style={styles.error}>{error}</div>}
@@ -74,15 +74,29 @@ function CashierLogin() {
 
           <label style={styles.label}>Password</label>
 
-          <input
-            type="password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            placeholder="Enter your password"
-            autoComplete="current-password"
-            required
-            style={styles.input}
-          />
+          <div style={styles.passwordContainer}>
+            <input
+              type={showPassword ? "text" : "password"}
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              placeholder="Enter your password"
+              autoComplete="current-password"
+              required
+              style={styles.passwordInput}
+            />
+
+            <button
+              type="button"
+              onClick={() =>
+                setShowPassword((previous) => !previous)
+              }
+              aria-label={showPassword ? "Hide password" : "Show password"}
+              aria-pressed={showPassword}
+              style={styles.toggleButton}
+            >
+              {showPassword ? "🙈 Hide" : "Show"}
+            </button>
+          </div>
 
           <button
             type="submit"
@@ -162,6 +176,35 @@ const styles = {
     fontSize: "15px",
     boxSizing: "border-box",
   },
+  passwordContainer: {
+    display: "flex",
+    width: "100%",
+    border: "1px solid #cbd5e1",
+    borderRadius: "8px",
+    overflow: "hidden",
+    boxSizing: "border-box",
+    background: "#ffffff",
+  },
+  passwordInput: {
+    flex: 1,
+    minWidth: 0,
+    padding: "12px",
+    border: "none",
+    outline: "none",
+    fontSize: "15px",
+    boxSizing: "border-box",
+  },
+  toggleButton: {
+    padding: "0 12px",
+    border: "none",
+    borderLeft: "1px solid #cbd5e1",
+    background: "#f8fafc",
+    color: "#334155",
+    fontSize: "14px",
+    fontWeight: "600",
+    cursor: "pointer",
+    whiteSpace: "nowrap",
+  },
   button: {
     width: "100%",
     marginTop: "24px",
@@ -182,3 +225,4 @@ const styles = {
 };
 
 export default CashierLogin;
+

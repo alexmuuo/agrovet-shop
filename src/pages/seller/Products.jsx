@@ -303,15 +303,30 @@ function Products() {
       return;
     }
 
-    const validStock = (value) =>
-      Number.isFinite(value) &&
-      value >= 0 &&
-      Math.abs(value * 1000 - Math.round(value * 1000)) < 0.000001;
+    const validStock = (value) => {
+  const text = toInputValue(value).trim();
 
-    if (stockText === "" || !validStock(stock)) {
-      alert("General stock must be non-negative and have at most three decimal places.");
-      return;
-    }
+  if (text === "") {
+    return false;
+  }
+
+  // Accept non-negative quantities with up to 3 decimal places.
+  // Examples: 0, 1, 0.5, 1.25, 0.125
+  if (!/^\d+(\.\d{1,3})?$/.test(text)) {
+    return false;
+  }
+
+  const number = Number(text);
+
+  return Number.isFinite(number) && number >= 0;
+};
+
+if (!validStock(stockText)) {
+  alert(
+    "Please enter a valid stock quantity. Use a non-negative number with up to three decimal places."
+  );
+  return;
+}
 
     let branchId = null;
     let initialBranchStock = null;
@@ -344,13 +359,12 @@ function Products() {
         return;
       }
 
-      if (
-        branchStockText === "" ||
-        !validStock(initialBranchStock)
-      ) {
-        alert("Initial branch stock must be non-negative and have at most three decimal places.");
-        return;
-      }
+      if (!validStock(branchStockText)) {
+  alert(
+    "Please enter a valid initial branch stock quantity with up to three decimal places."
+  );
+  return;
+}
     }
 
     let portionsPerUnit = null;
