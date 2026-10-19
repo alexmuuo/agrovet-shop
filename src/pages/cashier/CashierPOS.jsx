@@ -1359,8 +1359,8 @@ function CashierPOS() {
                           : unavailable
                             ? "Out of stock"
                             : unitInCart
-                              ? "Add another whole unit"
-                              : "Add whole unit"}
+                              ? "Add another "
+                              : "Add to cart"}
                       </button>
 
                       {canPortion && (

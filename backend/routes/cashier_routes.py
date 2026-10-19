@@ -281,6 +281,7 @@ def get_active_cashier_branch(cashier):
     ).scalar_one_or_none()
 
 
+
 # ============================================================
 # STOCK PRODUCTS
 # GET /api/cashier/stock/products
@@ -294,8 +295,12 @@ def get_stock_products():
     Return active products assigned to the authenticated
     cashier's branch.
 
-    Includes the actual product selling price and branch-specific
-    stock quantity. Never uses global Product.stock as branch stock.
+    Includes:
+    - Actual product selling price.
+    - Branch-specific stock quantity.
+    - Portion-selling configuration.
+
+    Never uses global Product.stock as branch stock.
     """
 
     try:
@@ -348,14 +353,28 @@ def get_stock_products():
                 "category": product.category,
                 "unit": product.unit,
 
-                # Actual selling price from the Product record.
+                # Actual selling price per whole stock unit.
                 "price": (
                     float(product.price)
                     if product.price is not None
                     else None
                 ),
 
-                # Branch-specific stock, not global Product.stock.
+                # Portion-selling configuration.
+                "allow_portion_sales": bool(
+                    product.allow_portion_sales
+                ),
+                "portions_per_unit": (
+                    product.portions_per_unit
+                ),
+                "portion_price": (
+                    float(product.portion_price)
+                    if product.portion_price is not None
+                    else None
+                ),
+
+                # Branch-specific stock.
+                # Do not substitute Product.stock here.
                 "stock": branch_quantity,
                 "branch_stock": branch_quantity,
                 "stock_quantity": branch_quantity,
