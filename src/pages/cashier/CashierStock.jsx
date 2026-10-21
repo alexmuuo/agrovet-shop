@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useState } from "react";
 import axios from "axios";
 
-const API_BASE = "https://agrovet-api-a00w.onrender.com/api";
+const API_BASE = "/api";
+const MAX_QUANTITY = 1000000;
+const QUANTITY_DECIMAL_PLACES = 3;
 
 function getAuthHeaders() {
 const token = localStorage.getItem("cashierToken");
@@ -9,6 +11,20 @@ const token = localStorage.getItem("cashierToken");
 return {
 Authorization: `Bearer ${token}`,
 };
+}
+
+function formatQuantity(value) {
+const number = Number(value);
+
+if (!Number.isFinite(number)) {
+return value ?? "0";
+}
+
+return number.toLocaleString("en-KE", {
+minimumFractionDigits: 0,
+maximumFractionDigits: QUANTITY_DECIMAL_PLACES,
+useGrouping: false,
+});
 }
 
 function CashierStock() {
@@ -89,20 +105,34 @@ setSuccess("");
 setLastMovement(null);
 
 const productId = Number(form.product_id);
-const quantity = Number(form.quantity);
+const quantityText = form.quantity.trim();
+const quantity = Number(quantityText);
 
-if (!Number.isInteger(productId) || productId <= 0) {
+if (!Number.isSafeInteger(productId) || productId <= 0) {
   setError("Please select a valid product.");
   return;
 }
 
-if (!Number.isInteger(quantity) || quantity <= 0) {
-  setError("Quantity must be a positive whole number.");
+if (
+  quantityText === "" ||
+  !Number.isFinite(quantity) ||
+  quantity <= 0
+) {
+  setError("Quantity must be a positive number greater than zero.");
   return;
 }
 
-if (quantity > 1_000_000) {
+if (quantity > MAX_QUANTITY) {
   setError("Please enter a quantity of 1,000,000 or less.");
+  return;
+}
+
+const decimalPart = quantityText.split(".")[1] || "";
+
+if (decimalPart.length > QUANTITY_DECIMAL_PLACES) {
+  setError(
+    "Quantity can have a maximum of three decimal places, for example 0.5 or 1.125."
+  );
   return;
 }
 
@@ -117,10 +147,17 @@ if (form.notes.trim().length > 5000) {
 }
 
 const confirmed = window.confirm(
-  `Add ${quantity} ${selectedProduct?.unit || "units"} to ${
-    selectedProduct?.name || "this product"
-  } at ${branch?.name || "your branch"}?\n\n` +
-    `Current branch stock: ${selectedProduct?.stock ?? "Unknown"}`
+  `Add ${formatQuantity(quantity)} ${
+    selectedProduct?.unit || "units"
+  } to ${selectedProduct?.name || "this product"} at ${
+    branch?.name || "your branch"
+  }?\n\n` +
+    `Current branch stock: ${formatQuantity(
+      selectedProduct?.stock ?? "Unknown"
+    )}\n` +
+    `New stock after addition: ${formatQuantity(
+      Number(selectedProduct?.stock || 0) + quantity
+    )}`
 );
 
 if (!confirmed) {
@@ -186,8 +223,7 @@ Inventory </p>
       {branch && (
         <div className="alert alert-info mt-3 mb-0">
           <i className="bi bi-shop me-2" />
-          Managing inventory for{" "}
-          <strong>{branch.name}</strong>
+          Managing inventory for <strong>{branch.name}</strong>
           {branch.code ? ` (${branch.code})` : ""}.
         </div>
       )}
@@ -237,21 +273,21 @@ Inventory </p>
           <div className="col-6 col-md-3">
             <div className="small text-secondary">Previous Stock</div>
             <div className="fw-semibold">
-              {lastMovement.previous_stock}
+              {formatQuantity(lastMovement.previous_stock)}
             </div>
           </div>
 
           <div className="col-6 col-md-3">
             <div className="small text-secondary">Quantity Added</div>
             <div className="fw-semibold text-success">
-              +{lastMovement.quantity_added}
+              +{formatQuantity(lastMovement.quantity_added)}
             </div>
           </div>
 
           <div className="col-6 col-md-3">
             <div className="small text-secondary">New Stock</div>
             <div className="fw-semibold">
-              {lastMovement.new_stock}
+              {formatQuantity(lastMovement.new_stock)}
             </div>
           </div>
         </div>
@@ -323,7 +359,8 @@ Inventory </p>
 
                   {products.map((product) => (
                     <option key={product.id} value={product.id}>
-                      {product.name} — Stock: {product.stock}{" "}
+                      {product.name} — Stock:{" "}
+                      {formatQuantity(product.stock)}{" "}
                       {product.unit || ""}
                     </option>
                   ))}
@@ -338,7 +375,7 @@ Inventory </p>
                     </span>
 
                     <strong>
-                      {selectedProduct.stock}{" "}
+                      {formatQuantity(selectedProduct.stock)}{" "}
                       {selectedProduct.unit || ""}
                     </strong>
                   </div>
@@ -354,10 +391,26 @@ Inventory </p>
                   <div className="d-flex justify-content-between gap-3 mt-2">
                     <span className="text-secondary">Branch</span>
 
-                    <span className="fw-semibold">
-                      {branch.name}
-                    </span>
+                    <span className="fw-semibold">{branch.name}</span>
                   </div>
+
+                  {form.quantity !== "" &&
+                    Number.isFinite(Number(form.quantity)) &&
+                    Number(form.quantity) > 0 && (
+                      <div className="d-flex justify-content-between gap-3 mt-2 pt-2 border-top">
+                        <span className="text-secondary">
+                          Stock after addition
+                        </span>
+
+                        <strong className="text-success">
+                          {formatQuantity(
+                            Number(selectedProduct.stock || 0) +
+                              Number(form.quantity)
+                          )}{" "}
+                          {selectedProduct.unit || ""}
+                        </strong>
+                      </div>
+                    )}
                 </div>
               )}
 
@@ -375,11 +428,11 @@ Inventory </p>
                   name="quantity"
                   type="number"
                   className="form-control"
-                  min="1"
-                  max="1000000"
-                  step="1"
-                  inputMode="numeric"
-                  placeholder="Enter quantity received"
+                  min="0.001"
+                  max={MAX_QUANTITY}
+                  step="any"
+                  inputMode="decimal"
+                  placeholder="e.g. 0.5, 1, 1.25"
                   value={form.quantity}
                   onChange={handleChange}
                   required
@@ -387,7 +440,9 @@ Inventory </p>
                 />
 
                 <div className="form-text">
-                  Enter a positive whole number.
+                  Enter a positive quantity. Decimal quantities are
+                  supported up to three decimal places, for example
+                  0.5, 1.25 or 2.375.
                 </div>
               </div>
 
@@ -499,9 +554,7 @@ Inventory </p>
 
             <li className="d-flex gap-2">
               <i className="bi bi-check-circle-fill text-success mt-1" />
-              <span>
-                Failed transactions are rolled back.
-              </span>
+              <span>Failed transactions are rolled back.</span>
             </li>
           </ul>
         </div>
@@ -535,9 +588,7 @@ Inventory </p>
     <div className="card-body p-4">
       <div className="d-flex flex-wrap justify-content-between align-items-center gap-3 mb-3">
         <div>
-          <h2 className="h5 fw-bold mb-1">
-            Current Branch Stock
-          </h2>
+          <h2 className="h5 fw-bold mb-1">Current Branch Stock</h2>
 
           <p className="text-secondary small mb-0">
             Inventory quantities for active products at your assigned
@@ -580,12 +631,12 @@ Inventory </p>
                   <td>
                     <span
                       className={`badge ${
-                        product.stock <= 5
+                        Number(product.stock) <= 5
                           ? "text-bg-warning"
                           : "text-bg-success"
                       }`}
                     >
-                      {product.stock}
+                      {formatQuantity(product.stock)}
                     </span>
                   </td>
 
