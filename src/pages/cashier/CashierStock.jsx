@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import api from "./api/api";
 
-const API_BASE = "https://agrovet-api-a00w.onrender.com/api";
 const MAX_QUANTITY = 1000000;
 const QUANTITY_DECIMAL_PLACES = 3;
 
