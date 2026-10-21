@@ -463,416 +463,159 @@ function AskAgrovet() {
   };
 
   // ============================================================
-  // RENDER
+  // RENDER — HEADMASTER LIQUORS SUPPORT EXPERIENCE
   // ============================================================
 
   return (
-    <div
-      className="container py-4"
-      style={{ maxWidth: "950px" }}
-    >
-      {/* PAGE HEADER */}
-
-      <div className="mb-4">
-        <div className="d-flex align-items-center gap-3">
-          <div
-            className="d-flex align-items-center justify-content-center rounded-circle"
-            style={{
-              width: "52px",
-              height: "52px",
-              backgroundColor: "#e8f5e9",
-              fontSize: "25px",
-            }}
-          >
-            🌱
-          </div>
-
-          <div>
-            <h2 className="fw-bold mb-1">Ask Agrovet</h2>
-            <p className="text-muted mb-0">
-              Get advice from our agrovet team
-            </p>
+    <main className="hm-support-page">
+      <section className="hm-support-hero">
+        <div className="hm-support-hero-copy">
+          <span className="hm-support-eyebrow"><span className="hm-support-live-dot" /> HEADMASTER CUSTOMER CARE</span>
+          <h1>We’re here to <em>help.</em></h1>
+          <p>Questions about an order, a product, or your shopping experience? Send our team a message and we’ll take it from there.</p>
+          <div className="hm-support-pills">
+            <span>Order assistance</span><span>Product enquiries</span><span>Shopping support</span>
           </div>
         </div>
-      </div>
+        <div className="hm-support-hero-mark" aria-hidden="true">
+          <div className="hm-support-mark-ring"><span>H</span></div>
+          <div className="hm-support-mark-caption">HEADMASTER <b>LIQUORS</b></div>
+        </div>
+      </section>
 
-      {/* CHAT CARD */}
+      <section className="hm-support-layout">
+        <aside className="hm-support-sidebar">
+          <div className="hm-support-side-card hm-support-side-dark">
+            <div className="hm-support-side-icon">✦</div>
+            <h2>Good service is part of the experience.</h2>
+            <p>Tell us what you need. Our team can help with questions and follow up on your conversation here.</p>
+            <div className="hm-support-side-rule" />
+            <div className="hm-support-side-status"><span className="hm-support-live-dot" /> Support inbox is open</div>
+          </div>
+          <div className="hm-support-side-card hm-support-side-light">
+            <span className="hm-support-card-kicker">BEFORE YOU MESSAGE</span>
+            <h3>A little detail goes a long way.</h3>
+            <p>For order questions, include your order number in the message. Please don’t send payment PINs, passwords, or other sensitive account details.</p>
+          </div>
+        </aside>
 
-      <div
-        className="card border-0 shadow-sm overflow-hidden"
-        style={{ borderRadius: "18px" }}
-      >
-        {/* CHAT HEADER */}
-
-        <div
-          className="p-3 border-bottom"
-          style={{ backgroundColor: "#f8faf8" }}
-        >
-          <div className="d-flex align-items-center justify-content-between">
-            <div className="d-flex align-items-center gap-3">
-              <div
-                className="d-flex align-items-center justify-content-center rounded-circle"
-                style={{
-                  width: "45px",
-                  height: "45px",
-                  backgroundColor: "#198754",
-                  color: "white",
-                  fontSize: "20px",
-                }}
-              >
-                🌾
-              </div>
-
-              <div>
-                <div className="fw-semibold">
-                  Agrovet Support
-                </div>
-
-                <div
-                  className="small"
-                  style={{ color: "#198754" }}
-                >
-                  <span
-                    className="d-inline-block rounded-circle me-1"
-                    style={{
-                      width: "7px",
-                      height: "7px",
-                      backgroundColor: "#198754",
-                    }}
-                  ></span>
-                  Available to help
-                </div>
-              </div>
+        <section className="hm-support-chat-card" aria-label="Customer support conversation">
+          <header className="hm-support-chat-header">
+            <div className="hm-support-agent-avatar">H</div>
+            <div className="hm-support-agent-details">
+              <h2>Headmaster Support</h2>
+              <p><span className="hm-support-live-dot" /> Customer care</p>
             </div>
-
             {customer && (
-              <div className="text-end d-none d-sm-block">
-                <div className="small text-muted">
-                  Chatting as
-                </div>
+              <div className="hm-support-chat-customer">
+                <span>CHATTING AS</span>
+                <strong>{customer.name}</strong>
+              </div>
+            )}
+          </header>
 
-                <div className="fw-semibold">
-                  {customer.name}
+          <div className="hm-support-messages" aria-live="polite">
+            {loading && (
+              <div className="hm-support-state">
+                <span className="hm-support-spinner" />
+                <strong>Opening your conversation</strong>
+                <span>Just a moment…</span>
+              </div>
+            )}
+
+            {!loading && messages.length === 0 && (
+              <div className="hm-support-empty">
+                <div className="hm-support-empty-icon">✉</div>
+                <span className="hm-support-card-kicker">YOUR SUPPORT CONVERSATION</span>
+                <h3>How can we help today?</h3>
+                <p>Start the conversation below. Our team will reply here, and your messages will stay in this chat.</p>
+                <div className="hm-support-topic-list">
+                  <span>Order status</span><span>Product questions</span><span>Delivery enquiries</span><span>Other assistance</span>
                 </div>
               </div>
             )}
-          </div>
-        </div>
 
-        {/* CHAT AREA */}
+            {!loading && messages.length > 0 && (
+              <>
+                <div className="hm-support-conversation-label"><span /> Conversation <span /></div>
+                {messages.map((item, index) => {
+                  const isCustomer = item.sender === "customer";
+                  const currentDate = formatDate(item.created_at);
+                  const previousDate = formatDate(messages[index - 1]?.created_at);
+                  const showDate = index === 0 || currentDate !== previousDate;
 
-        <div
-          className="p-3 p-md-4"
-          style={{
-            height: "500px",
-            overflowY: "auto",
-            backgroundColor: "#f7f9f7",
-          }}
-        >
-          {loading && (
-            <div className="h-100 d-flex align-items-center justify-content-center">
-              <div className="text-center text-muted">
-                <div
-                  className="spinner-border mb-3"
-                  role="status"
-                >
-                  <span className="visually-hidden">
-                    Loading...
-                  </span>
-                </div>
-
-                <div>Loading your conversation...</div>
-              </div>
-            </div>
-          )}
-
-          {!loading && messages.length === 0 && (
-            <div className="h-100 d-flex align-items-center justify-content-center">
-              <div
-                className="text-center"
-                style={{ maxWidth: "430px" }}
-              >
-                <div
-                  style={{
-                    fontSize: "50px",
-                    marginBottom: "10px",
-                  }}
-                >
-                  👋
-                </div>
-
-                <h5 className="fw-bold">
-                  How can we help?
-                </h5>
-
-                <p className="text-muted mb-3">
-                  Ask us anything about farming, crops,
-                  livestock, pests, diseases, fertilizers,
-                  animal health or our products.
-                </p>
-
-                <div className="d-flex flex-wrap justify-content-center gap-2">
-                  <span className="badge bg-white text-dark border p-2">
-                    🌽 Crop problems
-                  </span>
-
-                  <span className="badge bg-white text-dark border p-2">
-                    🐄 Animal health
-                  </span>
-
-                  <span className="badge bg-white text-dark border p-2">
-                    🐛 Pest control
-                  </span>
-
-                  <span className="badge bg-white text-dark border p-2">
-                    🌱 Fertilizers
-                  </span>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {!loading && messages.length > 0 && (
-            <>
-              <div className="text-center mb-4">
-                <span className="badge bg-white text-muted border px-3 py-2">
-                  Your conversation
-                </span>
-              </div>
-
-              {messages.map((item, index) => {
-                const isCustomer =
-                  item.sender === "customer";
-
-                const currentDate = formatDate(
-                  item.created_at
-                );
-
-                const previousDate = formatDate(
-                  messages[index - 1]?.created_at
-                );
-
-                const showDate =
-                  index === 0 ||
-                  currentDate !== previousDate;
-
-                return (
-                  <div key={item.id || index}>
-                    {showDate && (
-                      <div className="text-center my-3">
-                        <small className="text-muted">
-                          {currentDate}
-                        </small>
-                      </div>
-                    )}
-
-                    <div
-                      className={`d-flex mb-3 ${
-                        isCustomer
-                          ? "justify-content-end"
-                          : "justify-content-start"
-                      }`}
-                    >
-                      <div style={{ maxWidth: "78%" }}>
-                        <div
-                          className="small text-muted mb-1"
-                          style={{
-                            marginLeft: isCustomer ? "0" : "8px",
-                            marginRight: isCustomer ? "8px" : "0",
-                            textAlign: isCustomer ? "right" : "left",
-                          }}
-                        >
-                          {isCustomer ? "You" : "Agrovet Support"}
-                        </div>
-
-                        <div
-                          className="px-3 py-2"
-                          style={{
-                            backgroundColor: isCustomer
-                              ? "#198754"
-                              : "#ffffff",
-                            color: isCustomer
-                              ? "#ffffff"
-                              : "#212529",
-                            borderRadius: isCustomer
-                              ? "16px 16px 4px 16px"
-                              : "16px 16px 16px 4px",
-                            boxShadow:
-                              "0 1px 3px rgba(0,0,0,0.08)",
-                            whiteSpace: "pre-wrap",
-                            wordBreak: "break-word",
-                          }}
-                        >
-                          <div>{item.message}</div>
-
-                          <div
-                            className="mt-1"
-                            style={{
-                              fontSize: "11px",
-                              opacity: isCustomer ? 0.8 : 0.55,
-                              textAlign: "right",
-                            }}
-                          >
-                            {formatTime(item.created_at)}
+                  return (
+                    <div key={item.id || index}>
+                      {showDate && currentDate && (
+                        <div className="hm-support-date"><span>{currentDate}</span></div>
+                      )}
+                      <div className={`hm-support-message-row ${isCustomer ? "is-customer" : "is-support"}`}>
+                        <div className="hm-support-message-wrap">
+                          <div className="hm-support-message-sender">{isCustomer ? "You" : "Headmaster Support"}</div>
+                          <div className="hm-support-bubble">
+                            <div className="hm-support-message-text">{item.message}</div>
+                            <time>{formatTime(item.created_at)}</time>
                           </div>
                         </div>
                       </div>
                     </div>
-                  </div>
-                );
-              })}
+                  );
+                })}
+                <div ref={messagesEndRef} />
+              </>
+            )}
+          </div>
 
-              <div ref={messagesEndRef}></div>
-            </>
+          {(error || success) && (
+            <div className="hm-support-feedback">
+              {error && <div className="hm-support-alert is-error" role="alert">{error}</div>}
+              {success && <div className="hm-support-alert is-success" role="status">{success}</div>}
+            </div>
           )}
-        </div>
 
-        {/* ERROR / SUCCESS */}
-
-        {(error || success) && (
-          <div className="px-3 pt-3">
-            {error && (
-              <div className="alert alert-danger py-2 mb-2">
-                {error}
+          {!customer && (
+            <div className="hm-support-guest-details">
+              <div className="hm-support-guest-heading">
+                <strong>First time here?</strong>
+                <span>Share your details so we can follow up.</span>
               </div>
-            )}
-
-            {success && (
-              <div className="alert alert-success py-2 mb-2">
-                {success}
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* FIRST-TIME CUSTOMER DETAILS */}
-
-        {!customer && (
-          <div className="p-3 border-top bg-white">
-            <div className="mb-3">
-              <h6 className="fw-bold mb-1">
-                Before you start
-              </h6>
-
-              <small className="text-muted">
-                Tell us who you are so our team can get back to you.
-              </small>
-            </div>
-
-            <div className="row g-2">
-              <div className="col-md-4">
-                <input
-                  type="text"
-                  name="name"
-                  className="form-control"
-                  placeholder="Your name"
-                  value={formData.name}
-                  onChange={handleChange}
-                />
-              </div>
-
-              <div className="col-md-4">
-                <input
-                  type="tel"
-                  name="phone"
-                  className="form-control"
-                  placeholder="Phone number"
-                  value={formData.phone}
-                  onChange={handleChange}
-                />
-              </div>
-
-              <div className="col-md-4">
-                <input
-                  type="email"
-                  name="email"
-                  className="form-control"
-                  placeholder="Email (optional)"
-                  value={formData.email}
-                  onChange={handleChange}
-                />
+              <div className="hm-support-guest-fields">
+                <label><span>Your name</span><input type="text" name="name" placeholder="Full name" autoComplete="name" value={formData.name} onChange={handleChange} /></label>
+                <label><span>Phone number</span><input type="tel" name="phone" placeholder="e.g. 07…" autoComplete="tel" value={formData.phone} onChange={handleChange} /></label>
+                <label><span>Email <small>(optional)</small></span><input type="email" name="email" placeholder="you@example.com" autoComplete="email" value={formData.email} onChange={handleChange} /></label>
               </div>
             </div>
-          </div>
-        )}
+          )}
 
-        {/* MESSAGE COMPOSER */}
-
-        <div className="p-3 border-top bg-white">
-          <form onSubmit={handleSend}>
-            <div className="d-flex align-items-end gap-2">
-              <div className="flex-grow-1">
-                <textarea
-                  className="form-control"
-                  rows="2"
-                  placeholder={
-                    customer
-                      ? "Type your message..."
-                      : "Type your question..."
+          <form className="hm-support-composer" onSubmit={handleSend}>
+            <div className="hm-support-composer-box">
+              <textarea
+                rows="2"
+                aria-label="Your message"
+                placeholder={customer ? "Write your message…" : "Write your question…"}
+                value={message}
+                onChange={(e) => setMessage(e.target.value)}
+                disabled={sending || loading}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault();
+                    if (!sending && !loading) handleSend(e);
                   }
-                  value={message}
-                  onChange={(e) => setMessage(e.target.value)}
-                  disabled={sending || loading}
-                  style={{
-                    resize: "none",
-                    borderRadius: "14px",
-                  }}
-                  onKeyDown={(e) => {
-                    if (
-                      e.key === "Enter" &&
-                      !e.shiftKey
-                    ) {
-                      e.preventDefault();
-
-                      if (!sending && !loading) {
-                        handleSend(e);
-                      }
-                    }
-                  }}
-                />
-
-                <div className="small text-muted mt-1">
-                  Press Enter to send · Shift + Enter for a new line
-                </div>
-              </div>
-
-              <button
-                type="submit"
-                className="btn btn-success d-flex align-items-center justify-content-center"
-                disabled={
-                  sending ||
-                  loading ||
-                  !message.trim()
-                }
-                style={{
-                  width: "52px",
-                  height: "52px",
-                  borderRadius: "14px",
                 }}
-              >
-                {sending ? (
-                  <span
-                    className="spinner-border spinner-border-sm"
-                    role="status"
-                  ></span>
-                ) : (
-                  "➤"
-                )}
-              </button>
+              />
+              <div className="hm-support-composer-footer">
+                <span>Enter to send <i>·</i> Shift + Enter for a new line</span>
+                <button type="submit" disabled={sending || loading || !message.trim()} aria-label="Send message">
+                  {sending ? <span className="hm-support-button-spinner" /> : <span aria-hidden="true">➤</span>}
+                  <span>{sending ? "Sending" : "Send message"}</span>
+                </button>
+              </div>
             </div>
+            <p className="hm-support-privacy-note">Your conversation is handled by the Headmaster Liquors customer care team.</p>
           </form>
-        </div>
-      </div>
-
-      {/* DISCLAIMER */}
-
-      <div className="text-center mt-3">
-        <small className="text-muted">
-          🌱 Agrovet advice is for guidance only. For serious animal
-          or crop problems, consult a qualified professional.
-        </small>
-      </div>
-    </div>
+        </section>
+      </section>
+    </main>
   );
 }
 
