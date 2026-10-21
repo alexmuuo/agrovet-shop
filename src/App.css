@@ -1432,3 +1432,750 @@ transition-duration: 0.01ms !important;
 animation-duration: 0.01ms !important;
 }
 }
+
+/* =========================================================
+   HEADMASTER LIQUORS — PREMIUM CUSTOMER NAVIGATION
+   ========================================================= */
+
+.hm-header {
+  position: sticky;
+  top: 0;
+  z-index: 1030;
+  width: 100%;
+  font-family: inherit;
+}
+
+.hm-top-strip {
+  background: #151a17;
+  color: #d6d0c1;
+  font-size: 11px;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+
+.hm-top-strip-inner {
+  width: min(1320px, calc(100% - 48px));
+  min-height: 32px;
+  margin: 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.hm-top-strip i {
+  color: #c9a85b;
+}
+
+.hm-responsible-note {
+  color: #aaa99f;
+}
+
+.hm-navbar {
+  background: #fffefa;
+  border-bottom: 1px solid #e9e5db;
+  box-shadow: 0 5px 20px rgba(24, 32, 26, 0.045);
+}
+
+.hm-navbar-inner {
+  width: min(1320px, calc(100% - 48px));
+  min-height: 88px;
+  margin: 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 28px;
+}
+
+.hm-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  flex-shrink: 0;
+  text-decoration: none;
+  color: #183b2b;
+}
+
+.hm-brand:hover {
+  color: #183b2b;
+}
+
+.hm-brand-mark {
+  width: 47px;
+  height: 47px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 14px;
+  background: #183b2b;
+  color: #d7b665;
+  font-size: 25px;
+  box-shadow: 0 5px 12px rgba(24, 59, 43, 0.13);
+}
+
+.hm-brand-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.hm-brand-name {
+  color: #183b2b;
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 21px;
+  font-weight: 700;
+  line-height: 1.1;
+  letter-spacing: -0.035em;
+}
+
+.hm-brand-caption {
+  color: #a0823e;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.13em;
+  line-height: 1.2;
+}
+
+.hm-navigation-content {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  min-width: 0;
+}
+
+.hm-navigation-links {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 25px;
+  margin: 0 auto;
+}
+
+.hm-nav-link {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 42px;
+  padding: 8px 0;
+  border: 0;
+  background: transparent;
+  color: #4d544e;
+  font-size: 13px;
+  font-weight: 600;
+  text-decoration: none;
+  white-space: nowrap;
+  transition: color 0.2s ease;
+}
+
+.hm-nav-link:hover,
+.hm-nav-link-active {
+  color: #183b2b;
+}
+
+.hm-nav-link-active::after {
+  position: absolute;
+  right: 0;
+  bottom: 1px;
+  left: 0;
+  height: 2px;
+  border-radius: 2px;
+  background: #c9a85b;
+  content: "";
+}
+
+.hm-category-trigger {
+  font-family: inherit;
+}
+
+.hm-category-trigger::after {
+  display: none !important;
+}
+
+.hm-nav-dropdown .dropdown-menu,
+.hm-account-menu {
+  min-width: 220px;
+  margin-top: 12px;
+  padding: 8px;
+  border: 1px solid #e9e5db;
+  border-radius: 12px;
+  background: #fffefa;
+  box-shadow: 0 16px 40px rgba(20, 31, 24, 0.13);
+}
+
+.hm-category-menu .dropdown-item,
+.hm-account-menu .dropdown-item {
+  padding: 10px 12px;
+  border-radius: 7px;
+  color: #343d36;
+  font-size: 13px;
+  transition:
+    background 0.2s ease,
+    color 0.2s ease;
+}
+
+.hm-category-menu .dropdown-item:hover,
+.hm-account-menu .dropdown-item:hover {
+  background: #edf2ed;
+  color: #183b2b;
+}
+
+.hm-category-menu .dropdown-divider,
+.hm-account-menu .dropdown-divider {
+  border-color: #e9e5db;
+}
+
+.hm-nav-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+.hm-icon-button {
+  position: relative;
+  width: 42px;
+  height: 42px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #e4e2d9;
+  border-radius: 11px;
+  background: #fffefa;
+  color: #244a37;
+  font-size: 18px;
+  transition: all 0.2s ease;
+}
+
+.hm-icon-button:hover {
+  border-color: #183b2b;
+  background: #edf2ed;
+}
+
+.hm-count-badge,
+.hm-message-badge {
+  position: absolute;
+  top: -5px;
+  right: -5px;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 2px solid #fffefa;
+  border-radius: 20px;
+  background: #b43e32;
+  color: #fff;
+  font-size: 9px;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.hm-message-badge {
+  top: 0;
+  right: -13px;
+}
+
+.hm-cart-button {
+  position: relative;
+  min-height: 42px;
+  padding: 0 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border: 1px solid #deded2;
+  border-radius: 11px;
+  background: #fffefa;
+  color: #183b2b;
+  font-size: 13px;
+  font-weight: 700;
+  text-decoration: none;
+  transition: all 0.2s ease;
+}
+
+.hm-cart-button:hover,
+.hm-cart-active {
+  border-color: #183b2b;
+  background: #edf2ed;
+  color: #183b2b;
+}
+
+.hm-cart-button > i {
+  font-size: 18px;
+}
+
+.hm-cart-count {
+  min-width: 20px;
+  height: 20px;
+  padding: 0 5px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 20px;
+  background: #c9a85b;
+  color: #19251d;
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.hm-login-button {
+  min-height: 42px;
+  padding: 0 17px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #183b2b;
+  border-radius: 11px;
+  background: #183b2b;
+  color: #fffefa;
+  font-size: 13px;
+  font-weight: 700;
+  text-decoration: none;
+  white-space: nowrap;
+  transition: all 0.2s ease;
+}
+
+.hm-login-button:hover {
+  border-color: #244f39;
+  background: #244f39;
+  color: #fffefa;
+  transform: translateY(-1px);
+}
+
+.hm-account-button {
+  min-height: 42px;
+  max-width: 190px;
+  padding: 0 12px 0 7px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid #e4e2d9;
+  border-radius: 11px;
+  background: #fffefa;
+  color: #183b2b;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.hm-account-button:hover,
+.hm-account-button:focus {
+  border-color: #c9a85b;
+  background: #fffefa;
+  color: #183b2b;
+}
+
+.hm-account-button::after {
+  margin-left: 2px;
+}
+
+.hm-account-avatar {
+  width: 29px;
+  height: 29px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  border-radius: 9px;
+  background: #e8eee7;
+  color: #183b2b;
+  font-size: 16px;
+}
+
+.hm-account-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hm-account-details {
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  overflow-wrap: anywhere;
+}
+
+.hm-account-details strong {
+  color: #183b2b;
+  font-size: 13px;
+}
+
+.hm-account-details small {
+  color: #777d75;
+  font-size: 12px;
+}
+
+.hm-logout-button {
+  color: #a63730 !important;
+}
+
+.hm-logout-button:hover {
+  background: #f9e9e7 !important;
+  color: #8e2b25 !important;
+}
+
+/* NOTIFICATION PANEL */
+
+.hm-notification-wrapper {
+  position: relative;
+}
+
+.hm-notification-dropdown {
+  position: fixed !important;
+  inset: auto !important;
+  z-index: 2000;
+  overflow-y: auto;
+  padding: 0;
+  border: 1px solid #e9e5db;
+  border-radius: 14px;
+  background: #fffefa;
+}
+
+.hm-notification-heading {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 15px 16px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border-bottom: 1px solid #e9e5db;
+  background: #fffefa;
+}
+
+.hm-notification-heading strong {
+  color: #183b2b;
+  font-size: 14px;
+}
+
+.hm-notification-heading button {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #916f2b;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.hm-notification-heading button:hover {
+  color: #183b2b;
+}
+
+.hm-notification-empty {
+  padding: 32px 20px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  color: #777d75;
+  font-size: 13px;
+}
+
+.hm-notification-empty i {
+  color: #b3b7ae;
+  font-size: 28px;
+}
+
+.hm-notification-item {
+  width: 100%;
+  padding: 14px 16px;
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  border: 0;
+  border-bottom: 1px solid #f0eee7;
+  background: #fffefa;
+  text-align: left;
+  transition: background 0.2s ease;
+}
+
+.hm-notification-item:hover {
+  background: #f3f5f0;
+}
+
+.hm-notification-item.hm-notification-unread {
+  background: #f0f5ed;
+}
+
+.hm-notification-icon {
+  width: 36px;
+  height: 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  border-radius: 10px;
+  background: #e3ebe0;
+  color: #244a37;
+  font-size: 17px;
+}
+
+.hm-notification-text {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.hm-notification-text strong {
+  color: #25352a;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.hm-notification-text > span {
+  color: #72776f;
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.hm-notification-text small {
+  align-self: flex-start;
+  padding: 3px 6px;
+  border-radius: 4px;
+  background: #dce9d9;
+  color: #244a37;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+}
+
+/* MOBILE MENU BUTTON */
+
+.hm-mobile-toggle {
+  width: 43px;
+  height: 43px;
+  padding: 11px;
+  display: none;
+  flex-direction: column;
+  justify-content: center;
+  gap: 5px;
+  border: 1px solid #e4e2d9;
+  border-radius: 10px;
+  background: #fffefa;
+}
+
+.hm-mobile-toggle span {
+  width: 100%;
+  height: 2px;
+  display: block;
+  border-radius: 3px;
+  background: #183b2b;
+  transition: all 0.2s ease;
+}
+
+.hm-mobile-toggle-open span:first-child {
+  transform: translateY(7px) rotate(45deg);
+}
+
+.hm-mobile-toggle-open span:nth-child(2) {
+  opacity: 0;
+}
+
+.hm-mobile-toggle-open span:last-child {
+  transform: translateY(-7px) rotate(-45deg);
+}
+
+/* TABLETS AND MOBILE */
+
+@media (max-width: 1100px) {
+  .hm-navbar-inner {
+    gap: 18px;
+  }
+
+  .hm-navigation-links {
+    gap: 17px;
+  }
+
+  .hm-brand-name {
+    font-size: 19px;
+  }
+
+  .hm-brand-caption {
+    font-size: 8px;
+  }
+
+  .hm-account-name {
+    max-width: 85px;
+  }
+}
+
+@media (max-width: 900px) {
+  .hm-top-strip-inner,
+  .hm-navbar-inner {
+    width: calc(100% - 32px);
+  }
+
+  .hm-navbar-inner {
+    min-height: 76px;
+    flex-wrap: wrap;
+    gap: 12px;
+    padding: 13px 0;
+  }
+
+  .hm-brand-mark {
+    width: 43px;
+    height: 43px;
+    font-size: 23px;
+  }
+
+  .hm-brand-name {
+    font-size: 19px;
+  }
+
+  .hm-mobile-toggle {
+    display: flex;
+    margin-left: auto;
+    flex-shrink: 0;
+  }
+
+  .hm-navigation-content {
+    width: 100%;
+    flex: 0 0 100%;
+    display: none;
+    align-items: stretch;
+    flex-direction: column;
+    gap: 18px;
+    padding: 15px 0 5px;
+    border-top: 1px solid #e9e5db;
+  }
+
+  .hm-navigation-content.hm-navigation-open {
+    display: flex;
+  }
+
+  .hm-navigation-links {
+    width: 100%;
+    align-items: stretch;
+    flex-direction: column;
+    gap: 2px;
+    margin: 0;
+  }
+
+  .hm-nav-link {
+    width: 100%;
+    min-height: 43px;
+    justify-content: flex-start;
+    padding: 10px 12px;
+    border-radius: 8px;
+    text-align: left;
+  }
+
+  .hm-nav-link:hover,
+  .hm-nav-link-active {
+    background: #edf2ed;
+  }
+
+  .hm-nav-link-active::after {
+    top: 9px;
+    right: auto;
+    bottom: 9px;
+    left: 0;
+    width: 3px;
+    height: auto;
+  }
+
+  .hm-nav-dropdown {
+    width: 100%;
+  }
+
+  .hm-nav-dropdown .dropdown-menu {
+    position: static !important;
+    width: 100%;
+    margin: 4px 0 8px;
+    border-radius: 9px;
+    box-shadow: none;
+  }
+
+  .hm-nav-actions {
+    width: 100%;
+    justify-content: flex-start;
+    flex-wrap: wrap;
+    padding-top: 12px;
+    border-top: 1px solid #e9e5db;
+  }
+
+  .hm-account-name {
+    max-width: 150px;
+  }
+
+  .hm-notification-dropdown {
+    max-width: calc(100vw - 24px);
+  }
+}
+
+@media (max-width: 480px) {
+  .hm-top-strip-inner,
+  .hm-navbar-inner {
+    width: calc(100% - 24px);
+  }
+
+  .hm-top-strip-inner {
+    min-height: 30px;
+    font-size: 9px;
+    letter-spacing: 0.035em;
+  }
+
+  .hm-responsible-note {
+    display: none;
+  }
+
+  .hm-navbar-inner {
+    min-height: 70px;
+  }
+
+  .hm-brand {
+    gap: 9px;
+  }
+
+  .hm-brand-mark {
+    width: 39px;
+    height: 39px;
+    border-radius: 11px;
+    font-size: 21px;
+  }
+
+  .hm-brand-name {
+    font-size: 17px;
+  }
+
+  .hm-brand-caption {
+    font-size: 7px;
+    letter-spacing: 0.09em;
+  }
+
+  .hm-mobile-toggle {
+    width: 40px;
+    height: 40px;
+  }
+
+  .hm-cart-button {
+    min-height: 40px;
+    padding: 0 10px;
+  }
+
+  .hm-icon-button {
+    width: 40px;
+    height: 40px;
+  }
+
+  .hm-login-button {
+    min-height: 40px;
+    padding: 0 12px;
+  }
+
+  .hm-account-button {
+    min-height: 40px;
+  }
+
+  .hm-account-name {
+    max-width: 115px;
+  }
+}
