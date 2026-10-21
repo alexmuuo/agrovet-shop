@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import axios from "axios";
 
-const API_BASE = "https://agrovet-api-a00w.onrender.com/api";
+const API_BASE = "/api";
 const MAX_QUANTITY = 1000000;
 const QUANTITY_DECIMAL_PLACES = 3;
 
