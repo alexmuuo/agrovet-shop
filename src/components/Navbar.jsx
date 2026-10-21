@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { Link, useNavigate, useLocation } from "react-router-dom";
 import { STORE_NAME } from "../config/store";
 import { useCart } from "../context/CartContext";
 import api from "../api/api";
@@ -7,14 +7,15 @@ import api from "../api/api";
 function Navbar() {
   const { cartCount } = useCart();
   const navigate = useNavigate();
+  const location = useLocation();
 
   const [customer, setCustomer] = useState(null);
   const [categories, setCategories] = useState([]);
   const [notifications, setNotifications] = useState([]);
   const [unreadCount, setUnreadCount] = useState(0);
   const [unreadMessageCount, setUnreadMessageCount] = useState(0);
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
-  // Notification dropdown positioning
   const notificationButtonRef = useRef(null);
 
   const [notificationDropdownPosition, setNotificationDropdownPosition] =
@@ -113,7 +114,7 @@ function Navbar() {
     };
   }, []);
 
-  // LOAD CATEGORIES
+  // LOAD PRODUCT CATEGORIES
   useEffect(() => {
     let cancelled = false;
 
@@ -240,10 +241,7 @@ function Navbar() {
 
     refreshNotifications();
 
-    const interval = setInterval(
-      refreshNotifications,
-      5000
-    );
+    const interval = setInterval(refreshNotifications, 5000);
 
     return () => {
       cancelled = true;
@@ -264,9 +262,7 @@ function Navbar() {
 
     const loadUnreadMessages = async () => {
       try {
-        const response = await api.get(
-          "/messages/unread-count"
-        );
+        const response = await api.get("/messages/unread-count");
 
         if (cancelled) {
           return;
@@ -302,10 +298,7 @@ function Navbar() {
 
     loadUnreadMessages();
 
-    const interval = setInterval(
-      loadUnreadMessages,
-      5000
-    );
+    const interval = setInterval(loadUnreadMessages, 5000);
 
     return () => {
       cancelled = true;
@@ -322,6 +315,7 @@ function Navbar() {
     setNotifications([]);
     setUnreadCount(0);
     setUnreadMessageCount(0);
+    setMobileMenuOpen(false);
 
     window.dispatchEvent(new Event("customerLogout"));
 
@@ -335,9 +329,7 @@ function Navbar() {
     }
 
     try {
-      await api.put(
-        `/notifications/${notification.id}/read`
-      );
+      await api.put(`/notifications/${notification.id}/read`);
 
       setNotifications((current) =>
         current.map((item) =>
@@ -347,9 +339,7 @@ function Navbar() {
         )
       );
 
-      setUnreadCount((count) =>
-        Math.max(count - 1, 0)
-      );
+      setUnreadCount((count) => Math.max(count - 1, 0));
     } catch (error) {
       console.error(
         "Could not mark notification as read:",
@@ -385,207 +375,253 @@ function Navbar() {
     }
   };
 
-  // NAVBAR UI
+  // CLOSE MOBILE MENU AFTER NAVIGATION
+  useEffect(() => {
+    setMobileMenuOpen(false);
+  }, [location.pathname, location.search]);
+
+  // ACTIVE NAVIGATION LINK
+  const isActive = (path) => {
+    if (path === "/") {
+      return location.pathname === "/";
+    }
+
+    return location.pathname.startsWith(path);
+  };
+
+  const navLinkClass = (path) =>
+    `hm-nav-link${isActive(path) ? " hm-nav-link-active" : ""}`;
+
   return (
-    <nav className="navbar navbar-expand-lg bg-white border-bottom sticky-top">
-      <div className="container">
-        {/* BRAND */}
-        <Link
-          className="navbar-brand fw-bold text-success"
-          to="/"
-        >
-          <i className="bi bi-flower1 me-2"></i>
-          {STORE_NAME}
-        </Link>
+    <header className="hm-header">
+      {/* BRAND STRIP */}
+      <div className="hm-top-strip">
+        <div className="hm-top-strip-inner">
+          <span>
+            <i className="bi bi-award me-2"></i>
+            Quality drinks. Memorable moments.
+          </span>
 
-        {/* MOBILE TOGGLE */}
-        <button
-          className="navbar-toggler"
-          type="button"
-          data-bs-toggle="collapse"
-          data-bs-target="#mainNavbar"
-          aria-controls="mainNavbar"
-          aria-expanded="false"
-          aria-label="Toggle navigation"
-        >
-          <span className="navbar-toggler-icon"></span>
-        </button>
+          <span className="hm-responsible-note">
+            Please enjoy responsibly.
+          </span>
+        </div>
+      </div>
 
-        {/* NAVIGATION */}
-        <div
-          className="collapse navbar-collapse"
-          id="mainNavbar"
-        >
-          <ul className="navbar-nav mx-auto mb-2 mb-lg-0">
-            <li className="nav-item">
-              <Link className="nav-link" to="/">
+      {/* MAIN NAVIGATION */}
+      <nav className="hm-navbar">
+        <div className="hm-navbar-inner">
+          {/* BRAND */}
+          <Link
+            className="hm-brand"
+            to="/"
+            aria-label={`${STORE_NAME} home`}
+          >
+            <span className="hm-brand-mark">
+              <i className="bi bi-cup-straw"></i>
+            </span>
+
+            <span className="hm-brand-copy">
+              <span className="hm-brand-name">
+                {STORE_NAME}
+              </span>
+
+              <span className="hm-brand-caption">
+                GOOD TASTE. GREAT COMPANY.
+              </span>
+            </span>
+          </Link>
+
+          {/* MOBILE MENU BUTTON */}
+          <button
+            className={`hm-mobile-toggle${
+              mobileMenuOpen ? " hm-mobile-toggle-open" : ""
+            }`}
+            type="button"
+            onClick={() =>
+              setMobileMenuOpen((current) => !current)
+            }
+            aria-expanded={mobileMenuOpen}
+            aria-controls="hm-main-navigation"
+            aria-label={
+              mobileMenuOpen ? "Close navigation" : "Open navigation"
+            }
+          >
+            <span></span>
+            <span></span>
+            <span></span>
+          </button>
+
+          {/* NAVIGATION CONTENT */}
+          <div
+            id="hm-main-navigation"
+            className={`hm-navigation-content${
+              mobileMenuOpen ? " hm-navigation-open" : ""
+            }`}
+          >
+            <div className="hm-navigation-links">
+              <Link
+                className={navLinkClass("/")}
+                to="/"
+              >
                 Home
               </Link>
-            </li>
 
-            <li className="nav-item">
-              <Link className="nav-link" to="/products">
-                Products
-              </Link>
-            </li>
-
-            {/* CATEGORIES DROPDOWN */}
-            <li className="nav-item dropdown">
-              <button
-                className="nav-link dropdown-toggle border-0 bg-transparent"
-                type="button"
-                data-bs-toggle="dropdown"
-                aria-expanded="false"
-              >
-                Categories
-              </button>
-
-              <ul className="dropdown-menu">
-                <li>
-                  <Link
-                    className="dropdown-item"
-                    to="/categories"
-                  >
-                    All Categories
-                  </Link>
-                </li>
-
-                <li>
-                  <hr className="dropdown-divider" />
-                </li>
-
-                {categories.length > 0 ? (
-                  categories.map((category) => (
-                    <li key={category}>
-                      <Link
-                        className="dropdown-item"
-                        to={`/products?category=${encodeURIComponent(
-                          category
-                        )}`}
-                      >
-                        {category}
-                      </Link>
-                    </li>
-                  ))
-                ) : (
-                  <li>
-                    <span className="dropdown-item-text text-muted">
-                      No categories available
-                    </span>
-                  </li>
-                )}
-              </ul>
-            </li>
-
-            {/* ASK AGROVET */}
-            <li className="nav-item">
               <Link
-                className="nav-link position-relative"
+                className={navLinkClass("/products")}
+                to="/products"
+              >
+                Shop
+              </Link>
+
+              {/* CATEGORIES */}
+              <div className="dropdown hm-nav-dropdown">
+                <button
+                  className={`hm-nav-link hm-category-trigger${
+                    location.pathname === "/categories"
+                      ? " hm-nav-link-active"
+                      : ""
+                  }`}
+                  type="button"
+                  data-bs-toggle="dropdown"
+                  aria-expanded="false"
+                >
+                  Categories
+                  <i className="bi bi-chevron-down ms-2"></i>
+                </button>
+
+                <ul className="dropdown-menu hm-category-menu">
+                  <li>
+                    <Link
+                      className="dropdown-item"
+                      to="/categories"
+                    >
+                      <i className="bi bi-grid me-2"></i>
+                      All Categories
+                    </Link>
+                  </li>
+
+                  <li>
+                    <hr className="dropdown-divider" />
+                  </li>
+
+                  {categories.length > 0 ? (
+                    categories.map((category) => (
+                      <li key={category}>
+                        <Link
+                          className="dropdown-item"
+                          to={`/products?category=${encodeURIComponent(
+                            category
+                          )}`}
+                        >
+                          {category}
+                        </Link>
+                      </li>
+                    ))
+                  ) : (
+                    <li>
+                      <span className="dropdown-item-text text-muted">
+                        No categories available
+                      </span>
+                    </li>
+                  )}
+                </ul>
+              </div>
+
+              {/* CUSTOMER HELP / MESSAGES */}
+              <Link
+                className={`${navLinkClass("/ask-agrovet")} hm-help-link`}
                 to="/ask-agrovet"
                 aria-label={
                   customer && unreadMessageCount > 0
-                    ? `Ask Agrovet, ${unreadMessageCount} unread messages`
-                    : "Ask Agrovet"
+                    ? `Customer help, ${unreadMessageCount} unread messages`
+                    : "Customer help"
                 }
-                style={{ paddingRight: "12px" }}
               >
-                Ask Agrovet
+                Help & Support
 
                 {customer && unreadMessageCount > 0 && (
-                  <span
-                    className="position-absolute top-0 start-100 translate-middle badge rounded-pill bg-danger"
-                    style={{
-                      fontSize: "0.65rem",
-                      minWidth: "18px",
-                      zIndex: 1,
-                      marginTop: "5px",
-                    }}
-                  >
+                  <span className="hm-message-badge">
                     {unreadMessageCount > 99
                       ? "99+"
                       : unreadMessageCount}
                   </span>
                 )}
               </Link>
-            </li>
-          </ul>
+            </div>
 
-          {/* RIGHT SIDE */}
-          <div className="d-flex align-items-center gap-2 navbar-actions">
-            {/* NOTIFICATIONS */}
-            {customer && (
-              <div className="dropdown notification-wrapper">
-                <button
-                  ref={notificationButtonRef}
-                  className="btn btn-outline-success position-relative"
-                  type="button"
-                  data-bs-toggle="dropdown"
-                  data-bs-display="static"
-                  onClick={positionNotificationDropdown}
-                  aria-expanded="false"
-                  title="Notifications"
-                  aria-label={
-                    unreadCount > 0
-                      ? `Notifications, ${unreadCount} unread`
-                      : "Notifications"
-                  }
-                >
-                  <i className="bi bi-bell"></i>
-
-                  {unreadCount > 0 && (
-                    <span className="position-absolute top-0 start-100 translate-middle badge rounded-pill bg-danger">
-                      {unreadCount > 99
-                        ? "99+"
-                        : unreadCount}
-                    </span>
-                  )}
-                </button>
-
-                <div
-                  className="dropdown-menu shadow notification-dropdown"
-                  style={{
-                    top: `${notificationDropdownPosition.top}px`,
-                    left: `${notificationDropdownPosition.left}px`,
-                    width: `${notificationDropdownPosition.width}px`,
-                    maxHeight: `${notificationDropdownPosition.maxHeight}px`,
-                  }}
-                >
-                  <div className="d-flex justify-content-between align-items-center px-3 py-2 border-bottom notification-heading">
-                    <strong>Notifications</strong>
+            {/* ACTIONS */}
+            <div className="hm-nav-actions">
+              {/* NOTIFICATIONS */}
+              {customer && (
+                <div className="dropdown hm-notification-wrapper">
+                  <button
+                    ref={notificationButtonRef}
+                    className="hm-icon-button"
+                    type="button"
+                    data-bs-toggle="dropdown"
+                    data-bs-display="static"
+                    onClick={positionNotificationDropdown}
+                    aria-expanded="false"
+                    aria-label={
+                      unreadCount > 0
+                        ? `Notifications, ${unreadCount} unread`
+                        : "Notifications"
+                    }
+                    title="Notifications"
+                  >
+                    <i className="bi bi-bell"></i>
 
                     {unreadCount > 0 && (
-                      <button
-                        type="button"
-                        className="btn btn-sm btn-link text-success text-decoration-none"
-                        onClick={markAllAsRead}
-                      >
-                        Mark all as read
-                      </button>
+                      <span className="hm-count-badge">
+                        {unreadCount > 99 ? "99+" : unreadCount}
+                      </span>
                     )}
-                  </div>
+                  </button>
 
-                  {notifications.length === 0 ? (
-                    <div className="text-center text-secondary py-4">
-                      <i className="bi bi-bell-slash fs-3 d-block mb-2"></i>
-                      No notifications yet.
-                    </div>
-                  ) : (
-                    notifications.slice(0, 10).map(
-                      (notification) => (
+                  <div
+                    className="dropdown-menu shadow hm-notification-dropdown"
+                    style={{
+                      top: `${notificationDropdownPosition.top}px`,
+                      left: `${notificationDropdownPosition.left}px`,
+                      width: `${notificationDropdownPosition.width}px`,
+                      maxHeight: `${notificationDropdownPosition.maxHeight}px`,
+                    }}
+                  >
+                    <div className="hm-notification-heading">
+                      <strong>Notifications</strong>
+
+                      {unreadCount > 0 && (
                         <button
-                          key={notification.id}
                           type="button"
-                          className={`dropdown-item text-wrap py-3 ${
-                            !notification.is_read
-                              ? "bg-light"
-                              : ""
-                          }`}
-                          onClick={() =>
-                            handleNotificationClick(notification)
-                          }
+                          onClick={markAllAsRead}
                         >
-                          <div className="d-flex notification-content">
-                            <div className="me-3">
+                          Mark all as read
+                        </button>
+                      )}
+                    </div>
+
+                    {notifications.length === 0 ? (
+                      <div className="hm-notification-empty">
+                        <i className="bi bi-bell-slash"></i>
+                        <span>No notifications yet.</span>
+                      </div>
+                    ) : (
+                      notifications.slice(0, 10).map(
+                        (notification) => (
+                          <button
+                            key={notification.id}
+                            type="button"
+                            className={`hm-notification-item${
+                              !notification.is_read
+                                ? " hm-notification-unread"
+                                : ""
+                            }`}
+                            onClick={() =>
+                              handleNotificationClick(notification)
+                            }
+                          >
+                            <span className="hm-notification-icon">
                               <i
                                 className={`bi ${
                                   notification.type === "order"
@@ -593,100 +629,97 @@ function Navbar() {
                                     : notification.type === "message"
                                     ? "bi-chat-dots"
                                     : "bi-bell"
-                                } text-success fs-5`}
+                                }`}
                               ></i>
-                            </div>
+                            </span>
 
-                            <div className="flex-grow-1 notification-text">
-                              <div className="fw-semibold">
-                                {notification.title}
-                              </div>
+                            <span className="hm-notification-text">
+                              <strong>{notification.title}</strong>
 
-                              <div className="small text-secondary">
-                                {notification.message}
-                              </div>
+                              <span>{notification.message}</span>
 
                               {!notification.is_read && (
-                                <span className="badge bg-success mt-1">
-                                  New
-                                </span>
+                                <small>NEW</small>
                               )}
-                            </div>
-                          </div>
-                        </button>
+                            </span>
+                          </button>
+                        )
                       )
-                    )
-                  )}
+                    )}
+                  </div>
                 </div>
-              </div>
-            )}
+              )}
 
-            {/* CART */}
-            <Link
-              to="/cart"
-              className="btn btn-outline-success position-relative"
-            >
-              <i className="bi bi-cart3"></i>
+              {/* CART */}
+              <Link
+                to="/cart"
+                className={`hm-cart-button${
+                  isActive("/cart") ? " hm-cart-active" : ""
+                }`}
+                aria-label={`Shopping cart, ${cartCount} items`}
+              >
+                <i className="bi bi-bag"></i>
+                <span className="hm-cart-label">Cart</span>
 
-              <span className="ms-1 d-none d-sm-inline">
-                Cart
-              </span>
-
-              <span className="position-absolute top-0 start-100 translate-middle badge rounded-pill bg-danger">
-                {cartCount}
-              </span>
-            </Link>
-
-            {/* ACCOUNT */}
-            {customer ? (
-              <div className="dropdown">
-                <button
-                  className="btn btn-success dropdown-toggle"
-                  type="button"
-                  data-bs-toggle="dropdown"
-                  aria-expanded="false"
-                >
-                  <i className="bi bi-person-circle me-1"></i>
-                  {customer.name}
-                </button>
-
-                <ul className="dropdown-menu dropdown-menu-end">
-                  <li>
-                    <span className="dropdown-item-text">
-                      <strong>{customer.name}</strong>
-                      <br />
-                      <small className="text-secondary">
-                        {customer.phone}
-                      </small>
-                    </span>
-                  </li>
-
-                  <li>
-                    <hr className="dropdown-divider" />
-                  </li>
-
-                  <li>
-                    <button
-                      type="button"
-                      className="dropdown-item text-danger"
-                      onClick={handleLogout}
-                    >
-                      <i className="bi bi-box-arrow-right me-2"></i>
-                      Logout
-                    </button>
-                  </li>
-                </ul>
-              </div>
-            ) : (
-              <Link to="/login" className="btn btn-success">
-                <i className="bi bi-person me-1"></i>
-                Login
+                <span className="hm-cart-count">
+                  {cartCount}
+                </span>
               </Link>
-            )}
+
+              {/* CUSTOMER ACCOUNT */}
+              {customer ? (
+                <div className="dropdown hm-account-dropdown">
+                  <button
+                    className="hm-account-button dropdown-toggle"
+                    type="button"
+                    data-bs-toggle="dropdown"
+                    aria-expanded="false"
+                  >
+                    <span className="hm-account-avatar">
+                      <i className="bi bi-person"></i>
+                    </span>
+
+                    <span className="hm-account-name">
+                      {customer.name}
+                    </span>
+                  </button>
+
+                  <ul className="dropdown-menu dropdown-menu-end hm-account-menu">
+                    <li className="hm-account-details">
+                      <strong>{customer.name}</strong>
+                      <small>{customer.phone}</small>
+                    </li>
+
+                    <li>
+                      <hr className="dropdown-divider" />
+                    </li>
+
+                    <li>
+                      <button
+                        type="button"
+                        className="dropdown-item hm-logout-button"
+                        onClick={handleLogout}
+                      >
+                        <i className="bi bi-box-arrow-right me-2"></i>
+                        Sign out
+                      </button>
+                    </li>
+                  </ul>
+                </div>
+              ) : (
+                <Link
+                  to="/login"
+                  className="hm-login-button"
+                >
+                  <i className="bi bi-person me-2"></i>
+                  Sign in
+                </Link>
+              )}
+            </div>
           </div>
         </div>
-      </div>
-    </nav>
+      </nav>
+    </header>
   );
 }
 
