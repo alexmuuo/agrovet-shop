@@ -1,14 +1,9 @@
 import axios from "axios";
 
-// ============================================================
-// API CONFIGURATION — RENDER BACKEND
-// ============================================================
-
 const api = axios.create({
-baseURL: "/api",
+  baseURL: "https://agrovet-api-a00w.onrender.com/api",
   timeout: 30000,
 });
-
 // ============================================================
 // REQUEST INTERCEPTOR
 // ATTACH THE CORRECT TOKEN TO PROTECTED ENDPOINTS
