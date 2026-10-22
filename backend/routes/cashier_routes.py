@@ -3,6 +3,8 @@ import logging
 from flask import Blueprint, request, jsonify, g
 from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
+from decimal import Decimal, InvalidOperation
+import math
 
 from extensions import db
 
@@ -444,16 +446,40 @@ def add_cashier_stock():
             "message": "Select a valid product.",
         }), 400
 
-    if (
-        isinstance(quantity, bool)
-        or not isinstance(quantity, int)
-        or quantity <= 0
-    ):
-        return jsonify({
-            "status": "error",
-            "message": "Quantity must be a positive whole number.",
-        }), 400
+    # Accept positive decimal or whole-number quantities.
+# Reject booleans, invalid values, and non-finite numbers.
+if isinstance(quantity, bool) or quantity is None:
+    return jsonify({
+        "status": "error",
+        "message": "Quantity must be a positive number.",
+    }), 400
 
+try:
+    if isinstance(quantity, float) and not math.isfinite(quantity):
+        raise InvalidOperation
+
+    quantity = Decimal(str(quantity))
+
+    if not quantity.is_finite() or quantity <= 0:
+        raise InvalidOperation
+
+except (InvalidOperation, ValueError, TypeError):
+    return jsonify({
+        "status": "error",
+        "message": "Quantity must be a valid positive number.",
+    }), 400
+
+if quantity.as_tuple().exponent < -3:
+    return jsonify({
+        "status": "error",
+        "message": "Quantity can have at most 3 decimal places.",
+    }), 400
+
+if quantity > Decimal("1000000"):
+    return jsonify({
+        "status": "error",
+        "message": "The quantity is too large.",
+    }), 400
     if quantity > 1_000_000:
         return jsonify({
             "status": "error",
