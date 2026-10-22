@@ -345,7 +345,15 @@ function Products() {
       const unit = toInputValue(product.unit).toLowerCase();
       const stock = Number(product.stock);
       const selling = Number(product.price);
-      const created = getCreatedDate(product);
+      const buying = Number(product.buying_price);
+
+      const hasBuying =
+         product.buying_price !== null &&
+         product.buying_price !== undefined &&
+         product.buying_price !== "" &&
+         Number.isFinite(buying);
+
+const created = getCreatedDate(product);
       const active = product.is_active === true || product.is_active === 1 ||
         product.is_active === "true" || product.is_active === "1";
       const portionsEnabled = Boolean(product.allow_portion_sales);
