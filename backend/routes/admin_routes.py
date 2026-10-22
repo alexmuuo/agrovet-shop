@@ -1846,10 +1846,15 @@ def get_branch_stock_admin(branch_id):
 # Does not change Product.stock.
 # ------------------------------------------------------------
 
-@admin_bp.route(
-    "/api/admin/branches/<int:branch_id>/stock/<int:product_id>",
-    methods=["PUT"]
-)
+
+from decimal import Decimal, InvalidOperation
+from numbers import Number
+import math
+
+from flask import jsonify, request
+from sqlalchemy.exc import IntegrityError
+
+
 @admin_required
 def update_branch_stock_admin(
     branch_id,
@@ -1863,18 +1868,37 @@ def update_branch_stock_admin(
             "message": "A valid JSON request body is required.",
         }), 400
 
-    quantity = data.get("quantity")
+    raw_quantity = data.get("quantity")
 
-    if (
-        isinstance(quantity, bool)
-        or not isinstance(quantity, int)
-        or quantity < 0
-    ):
+    # Accept integer, decimal, and numeric string quantities.
+    # Explicitly reject booleans, which Python treats as integers.
+    if isinstance(raw_quantity, bool) or raw_quantity is None:
         return jsonify({
             "status": "error",
-            "message": (
-                "Quantity must be a non-negative integer."
-            ),
+            "message": "Quantity must be a non-negative number.",
+        }), 400
+
+    try:
+        if isinstance(raw_quantity, float):
+            if not math.isfinite(raw_quantity):
+                raise InvalidOperation
+
+        quantity = Decimal(str(raw_quantity))
+
+        if not quantity.is_finite() or quantity < 0:
+            raise InvalidOperation
+
+    except (InvalidOperation, ValueError, TypeError):
+        return jsonify({
+            "status": "error",
+            "message": "Quantity must be a valid non-negative number.",
+        }), 400
+
+    # Match the stock precision used by the inventory system.
+    if quantity.as_tuple().exponent < -3:
+        return jsonify({
+            "status": "error",
+            "message": "Quantity can have at most 3 decimal places.",
         }), 400
 
     try:
@@ -1930,12 +1954,14 @@ def update_branch_stock_admin(
 
         db.session.commit()
 
+        saved_quantity = float(stock.quantity)
+
         return jsonify({
             "status": "success",
             "message": "Branch stock updated successfully.",
             "branch_id": branch_id,
             "product_id": product_id,
-            "quantity": quantity,
+            "quantity": saved_quantity,
         }), 200
 
     except IntegrityError:
@@ -1949,7 +1975,10 @@ def update_branch_stock_admin(
 
         return jsonify({
             "status": "error",
-            "message": "The stock update conflicted with a database constraint.",
+            "message": (
+                "The stock update conflicted with a database "
+                "constraint. Check the backend logs."
+            ),
         }), 409
 
     except Exception:
