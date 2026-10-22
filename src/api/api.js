@@ -5,8 +5,8 @@ import axios from "axios";
 // ============================================================
 
 const api = axios.create({
-baseURL: "https://agrovet-api-a00w.onrender.com/api",
-timeout: 30000,
+baseURL: "/api",
+  timeout: 30000,
 });
 
 // ============================================================
