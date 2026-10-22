@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import api from "../../../api/api.js";
-
+import api from "./api/api";
 const MAX_QUANTITY = 1000000;
 const QUANTITY_DECIMAL_PLACES = 3;
 
