@@ -4,7 +4,7 @@ import sys
 # Locate the existing Flask backend.
 
 BACKEND_DIR = os.path.abspath(
-os.path.join(os.path.dirname(**file**), "..", "backend")
+os.path.join(os.path.dirname(__file__), "..", "backend")
 )
 
 if BACKEND_DIR not in sys.path:
