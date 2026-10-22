@@ -26,36 +26,135 @@ function formatQuantity(value) {
   });
 }
 
-function getErrorMessage(error) {
+function getErrorMessage(error, operation = "loading inventory") {
   const status = error.response?.status;
-  const message = error.response?.data?.message;
-  const normalizedMessage =
-    typeof message === "string" ? message.toLowerCase() : "";
+  const data = error.response?.data;
+  const serverMessage =
+    typeof data?.message === "string" ? data.message.trim() : "";
 
   if (!error.response) {
-    return "Cannot connect to the backend. Please check your connection and try again.";
+    return (
+      `Network error while ${operation}. ` +
+      "No HTTP response was received. Check the API base URL, " +
+      "backend availability, and browser Network tab."
+    );
   }
 
   if (status === 401) {
-    return "Your cashier session is invalid or has expired. Please log in again.";
-  }
-
-  if (
-    status === 403 &&
-    normalizedMessage.includes("branch")
-  ) {
-    return message;
+    return (
+      `Authentication failed while ${operation} (HTTP 401). ` +
+      "The cashier token may be missing, invalid, or expired. " +
+      "Log out and sign in again."
+    );
   }
 
   if (status === 403) {
-    return message || "You do not have permission to perform this action.";
+    return (
+      `Permission denied while ${operation} (HTTP 403). ` +
+      (serverMessage
+        ? `Backend message: ${serverMessage}`
+        : "The backend rejected the request without a message. " +
+          "Check the cashier's permissions and branch-validation logic.")
+    );
+  }
+
+  if (status === 404) {
+    return (
+      `API endpoint not found while ${operation} (HTTP 404). ` +
+      "Check the API base URL, deployed backend version, and route registration."
+    );
+  }
+
+  if (status === 409) {
+    return (
+      `Conflict while ${operation} (HTTP 409). ` +
+      (serverMessage || "The request conflicts with the current inventory state.")
+    );
+  }
+
+  if (status === 422) {
+    return (
+      `Validation failed while ${operation} (HTTP 422). ` +
+      (serverMessage || "The backend rejected the supplied data.")
+    );
+  }
+
+  if (status === 429) {
+    return (
+      `Too many requests while ${operation} (HTTP 429). ` +
+      "Wait briefly before trying again."
+    );
   }
 
   if (status >= 500) {
-    return message || "The server encountered an error. Please try again.";
+    return (
+      `Backend error while ${operation} (HTTP ${status}). ` +
+      (serverMessage ||
+        "The server failed without providing a useful error message. " +
+        "Inspect the deployed backend logs.")
+    );
   }
 
-  return message || "The request failed. Please try again.";
+  return (
+    `Request failed while ${operation} (HTTP ${status}). ` +
+    (serverMessage || "Inspect the browser Network tab for the response.")
+  );
+}
+
+function logDiagnostic(operation, error, extra = {}) {
+  console.error(`[Cashier Stock] ${operation}`, {
+    endpoint: error.config?.url || "Unknown endpoint",
+    method: error.config?.method?.toUpperCase() || "Unknown method",
+    httpStatus: error.response?.status ?? null,
+    responseData: error.response?.data ?? null,
+    responseHeaders: error.response?.headers ?? null,
+    errorMessage: error.message,
+    ...extra,
+  });
+}
+
+function getResponseProblem(data) {
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
+    return (
+      "The inventory endpoint returned an invalid response. " +
+      "Expected a JSON object containing status, products, and branch."
+    );
+  }
+
+  if (data.status !== "success") {
+    return (
+      "The inventory endpoint returned an unexpected status. " +
+      `Received status: ${String(data.status ?? "missing")}. ` +
+      "Expected status: success."
+    );
+  }
+
+  if (!Array.isArray(data.products)) {
+    return (
+      "The inventory endpoint returned an invalid products field. " +
+      "Expected products to be an array."
+    );
+  }
+
+  if (!data.branch || typeof data.branch !== "object") {
+    const availableKeys = Object.keys(data).join(", ") || "none";
+
+    return (
+      "The inventory endpoint returned products but no valid branch object. " +
+      `Response fields received: ${availableKeys}. ` +
+      "Check the GET /cashier/stock/products response and its branch serialization."
+    );
+  }
+
+  if (data.branch.id == null || !data.branch.name) {
+    return (
+      "The inventory endpoint returned an incomplete branch object. " +
+      "The branch must include an id and name. " +
+      "Check the backend branch serializer."
+    );
+  }
+
+  return "";
 }
 
 function CashierStock() {
@@ -84,32 +183,38 @@ function CashierStock() {
       });
 
       const data = response.data;
+      const responseProblem = getResponseProblem(data);
 
-      if (!data || data.status !== "success") {
-        throw new Error("The server returned an unexpected response.");
+      if (responseProblem) {
+        console.error("[Cashier Stock] Invalid inventory response", {
+          endpoint: "/cashier/stock/products",
+          httpStatus: response.status,
+          responseData: data,
+          responseHeaders: response.headers,
+          responseProblem,
+        });
+
+        setProducts([]);
+        setBranch(null);
+        setError(responseProblem);
+        return;
       }
 
-      setProducts(
-        Array.isArray(data.products) ? data.products : []
-      );
+      setProducts(data.products);
+      setBranch(data.branch);
 
-      setBranch(data.branch || null);
-
-      if (!data.branch) {
+      if (data.products.length === 0) {
         setError(
-          "The server did not return your assigned branch. Please contact an administrator."
+          "The assigned branch was confirmed, but its inventory contains no products. " +
+          "Check BranchProductStock records for this branch."
         );
       }
     } catch (err) {
-      console.error("Cashier stock loading failed:", {
-        status: err.response?.status,
-        response: err.response?.data,
-        message: err.message,
-      });
+      logDiagnostic("Failed to load branch inventory", err);
 
       setProducts([]);
       setBranch(null);
-      setError(getErrorMessage(err));
+      setError(getErrorMessage(err, "loading branch inventory"));
     } finally {
       setLoading(false);
     }
@@ -149,7 +254,8 @@ function CashierStock() {
 
     if (!branch) {
       setError(
-        "Your assigned branch has not been loaded. Refresh the inventory before adding stock."
+        "Stock addition stopped before sending a request: no valid branch " +
+        "was loaded. Resolve the inventory-loading error first."
       );
       return;
     }
@@ -159,7 +265,7 @@ function CashierStock() {
     const quantity = Number(quantityText);
 
     if (!Number.isSafeInteger(productId) || productId <= 0) {
-      setError("Please select a valid product.");
+      setError("Invalid product selection. Select a valid product.");
       return;
     }
 
@@ -168,12 +274,12 @@ function CashierStock() {
       !Number.isFinite(quantity) ||
       quantity <= 0
     ) {
-      setError("Quantity must be a positive number greater than zero.");
+      setError("Invalid quantity. Enter a number greater than zero.");
       return;
     }
 
     if (quantity > MAX_QUANTITY) {
-      setError("Quantity cannot exceed 1,000,000.");
+      setError("Quantity exceeds the maximum permitted value of 1,000,000.");
       return;
     }
 
@@ -181,30 +287,37 @@ function CashierStock() {
 
     if (decimalPart.length > QUANTITY_DECIMAL_PLACES) {
       setError(
-        "Quantity can have a maximum of three decimal places, for example 0.5, 1.25 or 2.375."
+        "Quantity precision error. Use no more than three decimal places, " +
+        "for example 0.5, 1.25, or 2.375."
       );
       return;
     }
 
     if (form.reference.trim().length > 150) {
-      setError("Reference cannot exceed 150 characters.");
+      setError("Reference validation failed: maximum length is 150 characters.");
       return;
     }
 
     if (form.notes.trim().length > 5000) {
-      setError("Notes cannot exceed 5,000 characters.");
+      setError("Notes validation failed: maximum length is 5,000 characters.");
       return;
     }
 
     if (!selectedProduct) {
-      setError("Please select a product from your branch inventory.");
+      setError(
+        "Product selection error. The selected product is not present " +
+        "in the currently loaded branch inventory. Refresh and try again."
+      );
       return;
     }
 
     const currentStock = Number(selectedProduct.stock);
 
     if (!Number.isFinite(currentStock) || currentStock < 0) {
-      setError("The current stock quantity is invalid. Refresh and try again.");
+      setError(
+        "Inventory data error. The selected product has an invalid stock quantity. " +
+        "Inspect its BranchProductStock record and backend serialization."
+      );
       return;
     }
 
@@ -214,8 +327,8 @@ function CashierStock() {
       `Add ${formatQuantity(quantity)} ${
         selectedProduct.unit || "units"
       } to ${selectedProduct.name} at ${branch.name}?\n\n` +
-        `Current branch stock: ${formatQuantity(currentStock)}\n` +
-        `New stock after addition: ${formatQuantity(newStock)}`
+      `Current branch stock: ${formatQuantity(currentStock)}\n` +
+      `New stock after addition: ${formatQuantity(newStock)}`
     );
 
     if (!confirmed) {
@@ -238,12 +351,33 @@ function CashierStock() {
         }
       );
 
+      if (
+        !response.data ||
+        typeof response.data !== "object" ||
+        response.data.status !== "success"
+      ) {
+        console.error("[Cashier Stock] Unexpected stock-add response", {
+          endpoint: "/cashier/stock/add",
+          httpStatus: response.status,
+          responseData: response.data,
+        });
+
+        setError(
+          "The stock-add request returned HTTP " +
+          `${response.status}, but the response did not contain ` +
+          'the expected status "success". Verify the backend response ' +
+          "before attempting another addition."
+        );
+
+        return;
+      }
+
       setSuccess(
-        response.data?.message ||
-          "Branch stock added successfully."
+        response.data.message ||
+        "Stock addition was accepted by the backend."
       );
 
-      setLastMovement(response.data?.movement || null);
+      setLastMovement(response.data.movement || null);
 
       setForm({
         product_id: "",
@@ -254,13 +388,13 @@ function CashierStock() {
 
       await loadProducts();
     } catch (err) {
-      console.error("Cashier stock addition failed:", {
-        status: err.response?.status,
-        response: err.response?.data,
-        message: err.message,
+      logDiagnostic("Failed to add branch stock", err, {
+        productId,
+        quantity,
+        branchId: branch.id,
       });
 
-      setError(getErrorMessage(err));
+      setError(getErrorMessage(err, "adding branch stock"));
     } finally {
       setSubmitting(false);
     }
@@ -373,10 +507,7 @@ function CashierStock() {
 
               {loading ? (
                 <div className="text-center py-5">
-                  <div
-                    className="spinner-border text-success"
-                    role="status"
-                  >
+                  <div className="spinner-border text-success" role="status">
                     <span className="visually-hidden">
                       Loading products...
                     </span>
@@ -389,14 +520,14 @@ function CashierStock() {
               ) : !branch ? (
                 <div className="alert alert-warning mb-0">
                   <i className="bi bi-exclamation-triangle me-2" />
-                  Stock management is unavailable until the server
-                  confirms your active branch assignment. Use Refresh
-                  Products to try again.
+                  Inventory loading failed. Read the detailed error above
+                  to identify whether authentication, branch resolution,
+                  response formatting, or the backend is responsible.
                 </div>
               ) : products.length === 0 ? (
                 <div className="alert alert-info mb-0">
-                  No active products were found in this branch's
-                  inventory.
+                  Your branch was confirmed, but no products are available
+                  in its inventory.
                 </div>
               ) : (
                 <form onSubmit={handleSubmit}>
@@ -451,9 +582,7 @@ function CashierStock() {
 
                       <div className="d-flex justify-content-between gap-3 mt-2">
                         <span className="text-secondary">Branch</span>
-                        <span className="fw-semibold">
-                          {branch.name}
-                        </span>
+                        <span className="fw-semibold">{branch.name}</span>
                       </div>
 
                       {form.quantity !== "" &&
@@ -551,9 +680,8 @@ function CashierStock() {
 
                   <div className="alert alert-warning small">
                     <i className="bi bi-shield-check me-2" />
-                    Your authenticated cashier account is used for
-                    accountability. The backend must validate your branch
-                    and save the stock change and its audit record together.
+                    Stock additions are validated by the backend and
+                    recorded against the authenticated cashier.
                   </div>
 
                   <button
