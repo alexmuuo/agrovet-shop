@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import api from "../../api/api";
-
+import api from "../../api/api.js";
 function Products() {
   const [products, setProducts] = useState([]);
   const [branches, setBranches] = useState([]);
