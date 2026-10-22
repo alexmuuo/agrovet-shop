@@ -597,35 +597,51 @@ if quantity > Decimal("1000000"):
             db.session.add(branch_stock)
             db.session.flush()
 
-        previous_stock = branch_stock.quantity
+        # Numeric database columns return Decimal values.
+# Normalize existing stock without rejecting valid decimals.
+try:
+    previous_stock = Decimal(str(branch_stock.quantity))
 
-        if (
-            isinstance(previous_stock, bool)
-            or not isinstance(previous_stock, int)
-            or previous_stock < 0
-        ):
-            db.session.rollback()
+    if (
+        not previous_stock.is_finite()
+        or previous_stock < 0
+    ):
+        raise InvalidOperation
 
-            return jsonify({
-                "status": "error",
-                "message": (
-                    "The branch has an invalid stock value. "
-                    "Please contact an administrator."
-                ),
-            }), 409
+except (InvalidOperation, ValueError, TypeError):
+    db.session.rollback()
 
-        new_stock = previous_stock + quantity
+    logger.error(
+        "Invalid branch stock value: branch_id=%s, "
+        "product_id=%s, value=%r",
+        branch.id,
+        product.id,
+        branch_stock.quantity,
+    )
 
-        if new_stock > 2_147_483_647:
-            db.session.rollback()
+    return jsonify({
+        "status": "error",
+        "message": (
+            "The branch has an invalid stock value. "
+            "Please contact an administrator."
+        ),
+    }), 409
 
-            return jsonify({
-                "status": "error",
-                "message": (
-                    "This addition exceeds the supported stock limit."
-                ),
-            }), 400
+new_stock = previous_stock + quantity
 
+# Numeric(12, 3) supports up to 9 integer digits and
+# 3 fractional digits.
+if new_stock > Decimal("999999999.999"):
+    db.session.rollback()
+
+    return jsonify({
+        "status": "error",
+        "message": (
+            "This addition exceeds the supported stock limit."
+        ),
+    }), 400
+
+branch_stock.quantity = new_stock
         # Update only the assigned branch's inventory.
         branch_stock.quantity = new_stock
 
