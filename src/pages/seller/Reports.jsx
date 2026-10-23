@@ -406,27 +406,30 @@ posProductsData,
 );
 
 const posTransactionList = getArray(
-posSalesData,
+posSales,
 "transactions",
 "sales_records",
 "sale_records"
 );
 
 const posRevenue = Number(
-getValue(
-posOverviewData,
-"total_sales",
-"total_revenue",
-"sales_total"
-)
+  getValue(
+    posOverviewData,
+    "sales_revenue",
+    "total_revenue",
+    "total_sales_revenue",
+    "sales_total",
+    "total_sales"
+  )
 );
 
 const posCost = getOptionalValue(
-posOverviewData,
-"total_cost",
-"total_buying_cost",
-"cost_of_goods",
-"total_cost_of_goods"
+  posOverviewData,
+  "total_cost",
+  "total_buying_cost",
+  "cost_of_goods",
+  "cost_of_goods_sold",
+  "total_cost_of_goods"
 );
 
 const posGrossProfit = getOptionalValue(
@@ -443,10 +446,11 @@ posOverviewData,
 );
 
 const posUnknownCostSales = getValue(
-posOverviewData,
-"unknown_cost_sales",
-"sales_with_unknown_cost",
-"unaccounted_cost_sales"
+  posOverviewData,
+  "unknown_cost_sales_value",
+  "unknown_cost_sales",
+  "sales_with_unknown_cost",
+  "unaccounted_cost_sales"
 );
 
 // =========================================================
@@ -1272,7 +1276,8 @@ Reports & Analytics </h2>
               profitData,
               "total_cost",
               "total_buying_cost",
-              "cost_of_goods"
+              "cost_of_goods",
+              "cost_of_goods_sold"
             )
           )}
           icon="bi-box-seam"
@@ -1349,6 +1354,7 @@ Reports & Analytics </h2>
               posOverviewData,
               "total_sales_count",
               "total_transactions",
+              "total_sales",
               "total_orders",
               "sales_count"
             )
@@ -1358,13 +1364,12 @@ Reports & Analytics </h2>
         />
 
         <StatCard
-          title="Paid POS Sales"
-          value={formatMoney(
+          title="Paid POS Transactions"
+          value={formatNumber(
             getValue(
               posOverviewData,
               "paid_sales",
-              "total_paid",
-              "paid_revenue"
+              "total_paid_transactions"
             )
           )}
           icon="bi-check-circle"
@@ -1373,13 +1378,13 @@ Reports & Analytics </h2>
         />
 
         <StatCard
-          title="Pending POS Payments"
-          value={formatMoney(
+          title="Pending POS Transactions"
+          value={formatNumber(
             getValue(
               posOverviewData,
-              "pending_payments",
-              "unpaid_sales",
-              "pending_amount"
+              "pending_payment_count",
+              "pending_transactions",
+              "unpaid_sales_count"
             )
           )}
           icon="bi-clock-history"
@@ -1582,7 +1587,9 @@ Reports & Analytics </h2>
                               item,
                               "total_sales_count",
                               "total_transactions",
+                              "transactions",
                               "sales_count",
+                              "sales",
                               "count"
                             )
                           )}
@@ -1594,6 +1601,7 @@ Reports & Analytics </h2>
                               item,
                               "total_sales",
                               "total_revenue",
+                              "sales_revenue",
                               "sales",
                               "revenue",
                               "total"
@@ -1658,7 +1666,8 @@ Reports & Analytics </h2>
                       product,
                       "total_cost",
                       "total_buying_cost",
-                      "cost_of_goods"
+                      "cost_of_goods",
+                      "cost_of_goods_sold"
                     );
 
                     const productProfit = getProfit(product);
@@ -1698,6 +1707,7 @@ Reports & Analytics </h2>
                               product,
                               "total_sales",
                               "total_value",
+                              "sales_revenue",
                               "revenue",
                               "subtotal"
                             )
@@ -1770,7 +1780,7 @@ Reports & Analytics </h2>
                     <th>Branch</th>
                     <th>Transactions</th>
                     <th className="text-end">Sales (KES)</th>
-                    <th className="text-end">Paid Sales (KES)</th>
+                    <th className="text-end">Paid Transactions</th>
                     <th className="text-end">Cost of Goods</th>
                     <th className="text-end">Gross Profit</th>
                     <th className="text-end">Margin</th>
@@ -1783,7 +1793,8 @@ Reports & Analytics </h2>
                       branch,
                       "total_cost",
                       "total_buying_cost",
-                      "cost_of_goods"
+                      "cost_of_goods",
+                      "cost_of_goods_sold"
                     );
 
                     const branchProfit = getProfit(branch);
@@ -1821,18 +1832,19 @@ Reports & Analytics </h2>
                               branch,
                               "total_sales",
                               "total_revenue",
-                              "sales_total"
+                              "sales_total",
+                              "sales_revenue"
                             )
                           )}
                         </td>
 
                         <td className="text-end text-success">
-                          {formatMoney(
+                          {formatNumber(
                             getValue(
                               branch,
                               "paid_sales",
-                              "total_paid",
-                              "paid_revenue"
+                              "paid_transactions",
+                              "total_paid_transactions"
                             )
                           )}
                         </td>
