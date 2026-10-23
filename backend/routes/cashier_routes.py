@@ -409,335 +409,328 @@ def get_stock_products():
 
 
 # ============================================================
-
 # ADD STOCK
-
 # POST /api/cashier/stock/add
-
-# CASHIER AUTHENTICATION REQUIRED
-
 # ============================================================
 
 @cashier_bp.route("/stock/add", methods=["POST"])
 @cashier_required
 def add_cashier_stock():
-"""
-Add stock to the authenticated cashier's assigned branch.
+    """
+    Add whole or fractional stock to the cashier's assigned branch.
 
-```
-Supports whole-number and decimal quantities with up to
-three decimal places.
+    Supports up to three decimal places.
+    Updates branch inventory and stock movement history
+    within the same database transaction.
+    """
 
-Branch inventory and stock movement history are committed
-in the same database transaction.
+    data = request.get_json(silent=True)
 
-Product.stock is not modified.
-"""
-
-data = request.get_json(silent=True)
-
-if not isinstance(data, dict):
-    return jsonify({
-        "status": "error",
-        "message": "A valid JSON request body is required.",
-    }), 400
-
-product_id = data.get("product_id")
-raw_quantity = data.get("quantity")
-
-# --------------------------------------------------------
-# VALIDATE PRODUCT ID
-# --------------------------------------------------------
-
-if (
-    isinstance(product_id, bool)
-    or not isinstance(product_id, int)
-    or product_id <= 0
-):
-    return jsonify({
-        "status": "error",
-        "message": "Select a valid product.",
-    }), 400
-
-# --------------------------------------------------------
-# VALIDATE DECIMAL QUANTITY
-# --------------------------------------------------------
-
-if isinstance(raw_quantity, bool) or raw_quantity is None:
-    return jsonify({
-        "status": "error",
-        "message": "Quantity must be a positive number.",
-    }), 400
-
-try:
-    if isinstance(raw_quantity, float) and not math.isfinite(raw_quantity):
-        raise InvalidOperation
-
-    quantity = Decimal(str(raw_quantity))
-
-    if not quantity.is_finite() or quantity <= Decimal("0"):
-        raise InvalidOperation
-
-except (InvalidOperation, ValueError, TypeError):
-    return jsonify({
-        "status": "error",
-        "message": "Quantity must be a valid positive number.",
-    }), 400
-
-if quantity.as_tuple().exponent < -3:
-    return jsonify({
-        "status": "error",
-        "message": "Quantity can have at most 3 decimal places.",
-    }), 400
-
-if quantity > Decimal("1000000"):
-    return jsonify({
-        "status": "error",
-        "message": "The quantity is too large.",
-    }), 400
-
-# --------------------------------------------------------
-# VALIDATE OPTIONAL REFERENCE AND NOTES
-# --------------------------------------------------------
-
-reference = data.get("reference", "")
-notes = data.get("notes", "")
-
-if reference is None:
-    reference = ""
-
-if notes is None:
-    notes = ""
-
-if not isinstance(reference, str) or not isinstance(notes, str):
-    return jsonify({
-        "status": "error",
-        "message": "Reference and notes must be text.",
-    }), 400
-
-reference = reference.strip()
-notes = notes.strip()
-
-if len(reference) > 150:
-    return jsonify({
-        "status": "error",
-        "message": "Reference cannot exceed 150 characters.",
-    }), 400
-
-if len(notes) > 5000:
-    return jsonify({
-        "status": "error",
-        "message": "Notes cannot exceed 5000 characters.",
-    }), 400
-
-# --------------------------------------------------------
-# UPDATE BRANCH INVENTORY
-# --------------------------------------------------------
-
-try:
-    cashier = db.session.execute(
-        select(Cashier)
-        .where(Cashier.id == g.cashier.id)
-        .with_for_update()
-    ).scalar_one_or_none()
-
-    if cashier is None or not cashier.is_active:
-        db.session.rollback()
-
+    if not isinstance(data, dict):
         return jsonify({
             "status": "error",
-            "message": "This cashier account is inactive or unavailable.",
-        }), 403
+            "message": "A valid JSON request body is required.",
+        }), 400
 
-    branch = get_active_cashier_branch(cashier)
+    product_id = data.get("product_id")
+    raw_quantity = data.get("quantity")
 
-    if branch is None:
-        db.session.rollback()
+    # --------------------------------------------------------
+    # VALIDATE PRODUCT ID
+    # --------------------------------------------------------
 
+    if (
+        isinstance(product_id, bool)
+        or not isinstance(product_id, int)
+        or product_id <= 0
+    ):
         return jsonify({
             "status": "error",
-            "message": (
-                "Your cashier account has no active assigned branch. "
-                "Please ask an administrator to assign you to a branch."
-            ),
-        }), 403
+            "message": "Select a valid product.",
+        }), 400
 
-    product = db.session.execute(
-        select(Product)
-        .where(Product.id == product_id)
-        .with_for_update()
-    ).scalar_one_or_none()
+    # --------------------------------------------------------
+    # VALIDATE DECIMAL QUANTITY
+    # --------------------------------------------------------
 
-    if product is None:
-        db.session.rollback()
-
+    if isinstance(raw_quantity, bool) or raw_quantity is None:
         return jsonify({
             "status": "error",
-            "message": "Product not found.",
-        }), 404
-
-    if not product.is_active:
-        db.session.rollback()
-
-        return jsonify({
-            "status": "error",
-            "message": "This product is inactive and cannot be restocked.",
-        }), 409
-
-    branch_stock = db.session.execute(
-        select(BranchProductStock)
-        .where(
-            BranchProductStock.branch_id == branch.id,
-            BranchProductStock.product_id == product.id,
-        )
-        .with_for_update()
-    ).scalar_one_or_none()
-
-    # Create the branch inventory row if it does not exist.
-    if branch_stock is None:
-        branch_stock = BranchProductStock(
-            branch_id=branch.id,
-            product_id=product.id,
-            quantity=Decimal("0.000"),
-        )
-
-        db.session.add(branch_stock)
-        db.session.flush()
-
-    # ----------------------------------------------------
-    # CONVERT EXISTING STOCK SAFELY
-    # ----------------------------------------------------
+            "message": "Quantity must be a positive number.",
+        }), 400
 
     try:
-        previous_stock = Decimal(str(branch_stock.quantity))
+        if isinstance(raw_quantity, float) and not math.isfinite(raw_quantity):
+            raise InvalidOperation
 
-        if not previous_stock.is_finite() or previous_stock < 0:
+        quantity = Decimal(str(raw_quantity))
+
+        if not quantity.is_finite() or quantity <= Decimal("0"):
             raise InvalidOperation
 
     except (InvalidOperation, ValueError, TypeError):
-        invalid_value = branch_stock.quantity
+        return jsonify({
+            "status": "error",
+            "message": "Quantity must be a valid positive number.",
+        }), 400
 
+    if quantity.as_tuple().exponent < -3:
+        return jsonify({
+            "status": "error",
+            "message": "Quantity can have at most 3 decimal places.",
+        }), 400
+
+    if quantity > Decimal("1000000"):
+        return jsonify({
+            "status": "error",
+            "message": "The quantity is too large.",
+        }), 400
+
+    # --------------------------------------------------------
+    # VALIDATE REFERENCE AND NOTES
+    # --------------------------------------------------------
+
+    reference = data.get("reference", "")
+    notes = data.get("notes", "")
+
+    if reference is None:
+        reference = ""
+
+    if notes is None:
+        notes = ""
+
+    if not isinstance(reference, str) or not isinstance(notes, str):
+        return jsonify({
+            "status": "error",
+            "message": "Reference and notes must be text.",
+        }), 400
+
+    reference = reference.strip()
+    notes = notes.strip()
+
+    if len(reference) > 150:
+        return jsonify({
+            "status": "error",
+            "message": "Reference cannot exceed 150 characters.",
+        }), 400
+
+    if len(notes) > 5000:
+        return jsonify({
+            "status": "error",
+            "message": "Notes cannot exceed 5000 characters.",
+        }), 400
+
+    # --------------------------------------------------------
+    # UPDATE BRANCH INVENTORY
+    # --------------------------------------------------------
+
+    try:
+        cashier = db.session.execute(
+            select(Cashier)
+            .where(Cashier.id == g.cashier.id)
+            .with_for_update()
+        ).scalar_one_or_none()
+
+        if cashier is None or not cashier.is_active:
+            db.session.rollback()
+
+            return jsonify({
+                "status": "error",
+                "message": "This cashier account is inactive or unavailable.",
+            }), 403
+
+        branch = get_active_cashier_branch(cashier)
+
+        if branch is None:
+            db.session.rollback()
+
+            return jsonify({
+                "status": "error",
+                "message": (
+                    "Your cashier account has no active assigned branch. "
+                    "Please ask an administrator to assign you to a branch."
+                ),
+            }), 403
+
+        product = db.session.execute(
+            select(Product)
+            .where(Product.id == product_id)
+            .with_for_update()
+        ).scalar_one_or_none()
+
+        if product is None:
+            db.session.rollback()
+
+            return jsonify({
+                "status": "error",
+                "message": "Product not found.",
+            }), 404
+
+        if not product.is_active:
+            db.session.rollback()
+
+            return jsonify({
+                "status": "error",
+                "message": (
+                    "This product is inactive and cannot be restocked."
+                ),
+            }), 409
+
+        branch_stock = db.session.execute(
+            select(BranchProductStock)
+            .where(
+                BranchProductStock.branch_id == branch.id,
+                BranchProductStock.product_id == product.id,
+            )
+            .with_for_update()
+        ).scalar_one_or_none()
+
+        # Create a branch stock record if none exists.
+        if branch_stock is None:
+            branch_stock = BranchProductStock(
+                branch_id=branch.id,
+                product_id=product.id,
+                quantity=Decimal("0.000"),
+            )
+
+            db.session.add(branch_stock)
+            db.session.flush()
+
+        # ----------------------------------------------------
+        # CONVERT EXISTING STOCK TO DECIMAL
+        # ----------------------------------------------------
+
+        try:
+            previous_stock = Decimal(str(branch_stock.quantity))
+
+            if not previous_stock.is_finite() or previous_stock < 0:
+                raise InvalidOperation
+
+        except (InvalidOperation, ValueError, TypeError):
+            invalid_value = branch_stock.quantity
+            db.session.rollback()
+
+            logger.error(
+                "Invalid branch stock: branch_id=%s, "
+                "product_id=%s, value=%r",
+                branch.id,
+                product.id,
+                invalid_value,
+            )
+
+            return jsonify({
+                "status": "error",
+                "message": (
+                    "The branch has an invalid stock value. "
+                    "Please contact an administrator."
+                ),
+            }), 409
+
+        # ----------------------------------------------------
+        # CALCULATE NEW STOCK USING DECIMAL ARITHMETIC
+        # ----------------------------------------------------
+
+        new_stock = previous_stock + quantity
+
+        if new_stock > Decimal("999999999.999"):
+            db.session.rollback()
+
+            return jsonify({
+                "status": "error",
+                "message": "This addition exceeds the supported stock limit.",
+            }), 400
+
+        # All quantities remain Decimal values in the database.
+        branch_stock.quantity = new_stock
+
+        # ----------------------------------------------------
+        # RECORD STOCK MOVEMENT
+        # ----------------------------------------------------
+
+        movement = StockMovement(
+            cashier_id=cashier.id,
+            product_id=product.id,
+            product_name=product.name,
+            previous_stock=previous_stock,
+            quantity_added=quantity,
+            new_stock=new_stock,
+            reference=reference or None,
+            notes=notes or None,
+        )
+
+        db.session.add(movement)
+        db.session.flush()
+
+        movement_data = serialize_stock_movement(movement)
+
+        result = {
+            "product": {
+                "id": product.id,
+                "name": product.name,
+                "stock": float(new_stock),
+                "unit": product.unit,
+            },
+            "branch": {
+                "id": branch.id,
+                "name": branch.name,
+                "code": branch.code,
+            },
+            "movement": movement_data,
+        }
+
+        # Save the stock update and audit record together.
+        db.session.commit()
+
+        logger.info(
+            "Cashier %s (ID %s) added %s units to product %s "
+            "(ID %s), branch %s (ID %s).",
+            cashier.username,
+            cashier.id,
+            quantity,
+            product.name,
+            product.id,
+            branch.name,
+            branch.id,
+        )
+
+        return jsonify({
+            "status": "success",
+            "message": (
+                f"Added {quantity} {product.unit} "
+                f"to {product.name} at {branch.name} successfully."
+            ),
+            **result,
+        }), 201
+
+    except IntegrityError:
         db.session.rollback()
 
-        logger.error(
-            "Invalid branch stock: branch_id=%s, product_id=%s, value=%r",
-            branch.id,
-            product.id,
-            invalid_value,
+        logger.exception(
+            "Branch stock addition violated a database constraint."
         )
 
         return jsonify({
             "status": "error",
             "message": (
-                "The branch has an invalid stock value. "
-                "Please contact an administrator."
+                "Stock could not be added because of a database "
+                "constraint or a concurrent inventory update. "
+                "Refresh the inventory and try again."
             ),
         }), 409
 
-    # ----------------------------------------------------
-    # CALCULATE AND VALIDATE NEW STOCK
-    # ----------------------------------------------------
-
-    new_stock = previous_stock + quantity
-
-    if new_stock > Decimal("999999999.999"):
+    except Exception:
         db.session.rollback()
+
+        logger.exception("Cashier branch stock addition failed.")
 
         return jsonify({
             "status": "error",
-            "message": "This addition exceeds the supported stock limit.",
-        }), 400
-
-    branch_stock.quantity = new_stock
-
-    # ----------------------------------------------------
-    # RECORD STOCK MOVEMENT
-    # ----------------------------------------------------
-
-    movement = StockMovement(
-        cashier_id=cashier.id,
-        product_id=product.id,
-        product_name=product.name,
-        previous_stock=previous_stock,
-        quantity_added=quantity,
-        new_stock=new_stock,
-        reference=reference or None,
-        notes=notes or None,
-    )
-
-    db.session.add(movement)
-    db.session.flush()
-
-    movement_data = serialize_stock_movement(movement)
-
-    result = {
-        "product": {
-            "id": product.id,
-            "name": product.name,
-            "stock": float(new_stock),
-            "unit": product.unit,
-        },
-        "branch": {
-            "id": branch.id,
-            "name": branch.name,
-            "code": branch.code,
-        },
-        "movement": movement_data,
-    }
-
-    # Commit the inventory update and audit record together.
-    db.session.commit()
-
-    logger.info(
-        "Cashier %s (ID %s) added %s units to product %s "
-        "(ID %s), branch %s (ID %s).",
-        cashier.username,
-        cashier.id,
-        quantity,
-        product.name,
-        product.id,
-        branch.name,
-        branch.id,
-    )
-
-    return jsonify({
-        "status": "success",
-        "message": (
-            f"Added {quantity} {product.unit} "
-            f"to {product.name} at {branch.name} successfully."
-        ),
-        **result,
-    }), 201
-
-except IntegrityError:
-    db.session.rollback()
-
-    logger.exception(
-        "Branch stock addition violated a database constraint."
-    )
-
-    return jsonify({
-        "status": "error",
-        "message": (
-            "Stock could not be added because of a database "
-            "constraint or a concurrent inventory update. "
-            "Refresh the inventory and try again."
-        ),
-    }), 409
-
-except Exception:
-    db.session.rollback()
-
-    logger.exception("Cashier branch stock addition failed.")
-
-    return jsonify({
-        "status": "error",
-        "message": (
-            "Unable to add stock right now. "
-            "No changes have been committed."
-        ),
-    }), 500
-
+            "message": (
+                "Unable to add stock right now. "
+                "No changes have been committed."
+            ),
+        }), 500
+        
 # ============================================================
 # SHARED ORDERS
 # GET /api/cashier/orders
