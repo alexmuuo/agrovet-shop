@@ -4,89 +4,95 @@ from decimal import Decimal
 from extensions import db
 
 class StockMovement(db.Model):
-__tablename__ = "stock_movements"
+**tablename** = "stock_movements"
 
 
 id = db.Column(
     db.Integer,
     primary_key=True,
-    autoincrement=True,
+    autoincrement=True
 )
 
 cashier_id = db.Column(
     db.Integer,
-    db.ForeignKey("cashiers.id", ondelete="RESTRICT"),
+    db.ForeignKey("cashiers.id"),
     nullable=False,
-    index=True,
+    index=True
 )
 
 product_id = db.Column(
     db.Integer,
-    db.ForeignKey("products.id", ondelete="RESTRICT"),
+    db.ForeignKey("products.id"),
     nullable=False,
-    index=True,
+    index=True
 )
 
-product_name = db.Column(
-    db.String(150),
+branch_id = db.Column(
+    db.Integer,
+    db.ForeignKey("branches.id"),
     nullable=False,
+    index=True
 )
 
-# All stock quantities support up to 3 decimal places.
 previous_stock = db.Column(
     db.Numeric(12, 3),
-    nullable=False,
+    nullable=False
 )
 
 quantity_added = db.Column(
     db.Numeric(12, 3),
-    nullable=False,
+    nullable=False
 )
 
 new_stock = db.Column(
     db.Numeric(12, 3),
-    nullable=False,
+    nullable=False
 )
 
 reference = db.Column(
-    db.String(150),
-    nullable=True,
+    db.String(100),
+    nullable=True
 )
 
 notes = db.Column(
     db.Text,
-    nullable=True,
+    nullable=True
 )
 
 created_at = db.Column(
     db.DateTime,
     nullable=False,
     default=datetime.utcnow,
-    index=True,
+    index=True
 )
 
 cashier = db.relationship(
     "Cashier",
-    foreign_keys=[cashier_id],
+    backref=db.backref("stock_movements", lazy=True)
 )
 
 product = db.relationship(
     "Product",
-    foreign_keys=[product_id],
+    backref=db.backref("stock_movements", lazy=True)
+)
+
+branch = db.relationship(
+    "Branch",
+    backref=db.backref("stock_movements", lazy=True)
 )
 
 __table_args__ = (
     db.CheckConstraint(
         "quantity_added > 0",
-        name="ck_stock_movements_quantity_positive",
+        name="ck_stock_movement_quantity_added_positive"
     ),
     db.CheckConstraint(
         "previous_stock >= 0",
-        name="ck_stock_movements_previous_stock_nonnegative",
+        name="ck_stock_movement_previous_stock_nonnegative"
     ),
     db.CheckConstraint(
         "new_stock = previous_stock + quantity_added",
-        name="ck_stock_movements_stock_math",
+        name="ck_stock_movement_stock_arithmetic"
     ),
 )
 
@@ -94,28 +100,11 @@ def to_dict(self):
     return {
         "id": self.id,
         "cashier_id": self.cashier_id,
-        "cashier_name": (
-            self.cashier.full_name
-            if self.cashier
-            else None
-        ),
         "product_id": self.product_id,
-        "product_name": self.product_name,
-        "previous_stock": (
-            float(Decimal(str(self.previous_stock)))
-            if self.previous_stock is not None
-            else None
-        ),
-        "quantity_added": (
-            float(Decimal(str(self.quantity_added)))
-            if self.quantity_added is not None
-            else None
-        ),
-        "new_stock": (
-            float(Decimal(str(self.new_stock)))
-            if self.new_stock is not None
-            else None
-        ),
+        "branch_id": self.branch_id,
+        "previous_stock": float(self.previous_stock),
+        "quantity_added": float(self.quantity_added),
+        "new_stock": float(self.new_stock),
         "reference": self.reference,
         "notes": self.notes,
         "created_at": (
