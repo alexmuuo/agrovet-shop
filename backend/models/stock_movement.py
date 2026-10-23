@@ -4,7 +4,7 @@ from decimal import Decimal
 from extensions import db
 
 class StockMovement(db.Model):
-**tablename** = "stock_movements"
+    __tablename__ = "stock_movements"
 
 
 id = db.Column(
