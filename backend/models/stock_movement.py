@@ -1,10 +1,15 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from extensions import db
 
+# East Africa Time (UTC+3). Kenya has no daylight saving, so a fixed
+# offset is safe and needs no tzdata dependency.
+EAT = timezone(timedelta(hours=3), "EAT")
+
 
 def _utcnow():
-    return datetime.now(timezone.utc).replace(tzinfo=None)
+    """Current moment as a timezone-aware UTC datetime."""
+    return datetime.now(timezone.utc)
 
 
 class StockMovement(db.Model):
@@ -67,8 +72,10 @@ class StockMovement(db.Model):
         nullable=True
     )
 
+    # Stored as TIMESTAMP WITH TIME ZONE: an exact moment in time,
+    # independent of the server's timezone.
     created_at = db.Column(
-        db.DateTime,
+        db.DateTime(timezone=True),
         nullable=False,
         default=_utcnow,
         index=True
@@ -104,7 +111,22 @@ class StockMovement(db.Model):
         ),
     )
 
+    def _created_at_eat(self):
+        """created_at converted to East Africa Time."""
+        if self.created_at is None:
+            return None
+
+        created_at = self.created_at
+
+        # Treat any naive value (e.g. not yet migrated) as UTC.
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=timezone.utc)
+
+        return created_at.astimezone(EAT)
+
     def to_dict(self):
+        created_at_eat = self._created_at_eat()
+
         return {
             "id": self.id,
             "cashier_id": self.cashier_id,
@@ -116,9 +138,10 @@ class StockMovement(db.Model):
             "new_stock": float(self.new_stock),
             "reference": self.reference,
             "notes": self.notes,
+            # e.g. "2026-10-23T15:50:59+03:00"
             "created_at": (
-                self.created_at.isoformat()
-                if self.created_at
+                created_at_eat.isoformat()
+                if created_at_eat
                 else None
             ),
         }
