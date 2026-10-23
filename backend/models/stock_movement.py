@@ -1,79 +1,81 @@
 from datetime import datetime
+from decimal import Decimal
 
 from extensions import db
 
-
 class StockMovement(db.Model):
-    __tablename__ = "stock_movements"
+__tablename__ = "stock_movements"
 
-    id = db.Column(
-        db.Integer,
-        primary_key=True,
-        autoincrement=True,
-    )
 
-    cashier_id = db.Column(
-        db.Integer,
-        db.ForeignKey("cashiers.id", ondelete="RESTRICT"),
-        nullable=False,
-        index=True,
-    )
+id = db.Column(
+    db.Integer,
+    primary_key=True,
+    autoincrement=True,
+)
 
-    product_id = db.Column(
-        db.Integer,
-        db.ForeignKey("products.id", ondelete="RESTRICT"),
-        nullable=False,
-        index=True,
-    )
+cashier_id = db.Column(
+    db.Integer,
+    db.ForeignKey("cashiers.id", ondelete="RESTRICT"),
+    nullable=False,
+    index=True,
+)
 
-    product_name = db.Column(
-        db.String(150),
-        nullable=False,
-    )
+product_id = db.Column(
+    db.Integer,
+    db.ForeignKey("products.id", ondelete="RESTRICT"),
+    nullable=False,
+    index=True,
+)
 
-    previous_stock = db.Column(
-        db.Integer,
-        nullable=False,
-    )
+product_name = db.Column(
+    db.String(150),
+    nullable=False,
+)
 
-    quantity_added = db.Column(
-        db.Integer,
-        nullable=False,
-    )
+# Numeric(12, 3) supports decimal quantities to 3 places.
+previous_stock = db.Column(
+    db.Numeric(12, 3),
+    nullable=False,
+)
 
-    new_stock = db.Column(
-        db.Integer,
-        nullable=False,
-    )
+quantity_added = db.Column(
+    db.Numeric(12, 3),
+    nullable=False,
+)
 
-    reference = db.Column(
-        db.String(150),
-        nullable=True,
-    )
+new_stock = db.Column(
+    db.Numeric(12, 3),
+    nullable=False,
+)
 
-    notes = db.Column(
-        db.Text,
-        nullable=True,
-    )
+reference = db.Column(
+    db.String(150),
+    nullable=True,
+)
 
-    created_at = db.Column(
-        db.DateTime,
-        nullable=False,
-        default=datetime.utcnow,
-        index=True,
-    )
+notes = db.Column(
+    db.Text,
+    nullable=True,
+)
 
-    cashier = db.relationship(
-        "Cashier",
-        foreign_keys=[cashier_id],
-    )
+created_at = db.Column(
+    db.DateTime,
+    nullable=False,
+    default=datetime.utcnow,
+    index=True,
+)
 
-    product = db.relationship(
-        "Product",
-        foreign_keys=[product_id],
-    )
+cashier = db.relationship(
+    "Cashier",
+    foreign_keys=[cashier_id],
+)
 
-    __table_args__ = (
+product = db.relationship(
+    "Product",
+    foreign_keys=[product_id],
+)
+
+__table_args__ = (
     db.CheckConstraint(
         "quantity_added > 0",
         name="ck_stock_movements_quantity_positive",
@@ -87,20 +89,33 @@ class StockMovement(db.Model):
         name="ck_stock_movements_stock_math",
     ),
 )
-    def to_dict(self):
-        return {
-            "id": self.id,
-            "cashier_id": self.cashier_id,
-            "cashier_name": (
-                self.cashier.full_name
-                if self.cashier
-                else None
-            ),
+
+def to_dict(self):
+    return {
+        "id": self.id,
+        "cashier_id": self.cashier_id,
+        "cashier_name": (
+            self.cashier.full_name
+            if self.cashier
+            else None
+        ),
         "product_id": self.product_id,
         "product_name": self.product_name,
-        "previous_stock": self.previous_stock,
-        "quantity_added": self.quantity_added,
-        "new_stock": self.new_stock,
+        "previous_stock": (
+            float(Decimal(str(self.previous_stock)))
+            if self.previous_stock is not None
+            else None
+        ),
+        "quantity_added": (
+            float(Decimal(str(self.quantity_added)))
+            if self.quantity_added is not None
+            else None
+        ),
+        "new_stock": (
+            float(Decimal(str(self.new_stock)))
+            if self.new_stock is not None
+            else None
+        ),
         "reference": self.reference,
         "notes": self.notes,
         "created_at": (
@@ -109,3 +124,4 @@ class StockMovement(db.Model):
             else None
         ),
     }
+
