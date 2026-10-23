@@ -1,90 +1,94 @@
-
 from datetime import datetime, timezone
- 
+
 from extensions import db
- 
- 
+
+
 def _utcnow():
     return datetime.now(timezone.utc).replace(tzinfo=None)
- 
- 
+
+
 class StockMovement(db.Model):
     __tablename__ = "stock_movements"
- 
+
     id = db.Column(
         db.Integer,
         primary_key=True,
         autoincrement=True
     )
- 
+
     cashier_id = db.Column(
         db.Integer,
         db.ForeignKey("cashiers.id"),
         nullable=False,
         index=True
     )
- 
+
     product_id = db.Column(
         db.Integer,
         db.ForeignKey("products.id"),
         nullable=False,
         index=True
     )
- 
+
+    product_name = db.Column(
+        db.String(255),
+        nullable=False
+    )
+
     branch_id = db.Column(
         db.Integer,
         db.ForeignKey("branches.id"),
         nullable=False,
         index=True
     )
- 
+
     previous_stock = db.Column(
         db.Numeric(12, 3),
         nullable=False
     )
- 
+
     quantity_added = db.Column(
         db.Numeric(12, 3),
         nullable=False
     )
- 
+
     new_stock = db.Column(
         db.Numeric(12, 3),
         nullable=False
     )
- 
+
     reference = db.Column(
         db.String(100),
         nullable=True
     )
- 
+
     notes = db.Column(
         db.Text,
         nullable=True
     )
- 
+
     created_at = db.Column(
         db.DateTime,
         nullable=False,
         default=_utcnow,
         index=True
     )
- 
+
     cashier = db.relationship(
         "Cashier",
         backref=db.backref("stock_movements", lazy=True)
     )
- 
+
     product = db.relationship(
         "Product",
         backref=db.backref("stock_movements", lazy=True)
     )
- 
+
     branch = db.relationship(
         "Branch",
         backref=db.backref("stock_movements", lazy=True)
     )
- 
+
     __table_args__ = (
         db.CheckConstraint(
             "quantity_added > 0",
@@ -99,12 +103,13 @@ class StockMovement(db.Model):
             name="ck_stock_movement_stock_arithmetic"
         ),
     )
- 
+
     def to_dict(self):
         return {
             "id": self.id,
             "cashier_id": self.cashier_id,
             "product_id": self.product_id,
+            "product_name": self.product_name,
             "branch_id": self.branch_id,
             "previous_stock": float(self.previous_stock),
             "quantity_added": float(self.quantity_added),
@@ -117,4 +122,3 @@ class StockMovement(db.Model):
                 else None
             ),
         }
- 
