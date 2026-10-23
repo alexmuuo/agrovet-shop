@@ -1,10 +1,10 @@
 import logging
+import math
+from decimal import Decimal, InvalidOperation
 
 from flask import Blueprint, request, jsonify, g
 from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
-from decimal import Decimal, InvalidOperation
-import math
 
 from extensions import db
 
@@ -174,6 +174,32 @@ def serialize_stock_movement(movement):
 
 
 # ============================================================
+# HELPER: ACTIVE CASHIER BRANCH
+# ============================================================
+
+def get_active_cashier_branch(cashier):
+    """
+    Return the cashier's assigned active branch.
+
+    A cashier without an active assigned branch must not
+    access or modify branch inventory.
+    """
+
+    if cashier is None or not cashier.is_active:
+        return None
+
+    if cashier.branch_id is None:
+        return None
+
+    return db.session.execute(
+        select(Branch).where(
+            Branch.id == cashier.branch_id,
+            Branch.is_active.is_(True),
+        )
+    ).scalar_one_or_none()
+
+
+# ============================================================
 # CASHIER LOGIN
 # POST /api/cashier/login
 # ============================================================
@@ -261,27 +287,6 @@ def get_current_cashier():
         "status": "success",
         "cashier": g.cashier.to_dict(),
     }), 200
-
-def get_active_cashier_branch(cashier):
-    """
-    Return the cashier's assigned active branch.
-
-    A cashier without an active assigned branch must not
-    access or modify branch inventory.
-    """
-    if cashier is None or not cashier.is_active:
-        return None
-
-    if cashier.branch_id is None:
-        return None
-
-    return db.session.execute(
-        select(Branch).where(
-            Branch.id == cashier.branch_id,
-            Branch.is_active.is_(True),
-        )
-    ).scalar_one_or_none()
-
 
 
 # ============================================================
@@ -460,7 +465,10 @@ def add_cashier_stock():
         }), 400
 
     try:
-        if isinstance(raw_quantity, float) and not math.isfinite(raw_quantity):
+        if (
+            isinstance(raw_quantity, float)
+            and not math.isfinite(raw_quantity)
+        ):
             raise InvalidOperation
 
         quantity = Decimal(str(raw_quantity))
@@ -536,7 +544,9 @@ def add_cashier_stock():
 
             return jsonify({
                 "status": "error",
-                "message": "This cashier account is inactive or unavailable.",
+                "message": (
+                    "This cashier account is inactive or unavailable."
+                ),
             }), 403
 
         branch = get_active_cashier_branch(cashier)
@@ -637,7 +647,9 @@ def add_cashier_stock():
 
             return jsonify({
                 "status": "error",
-                "message": "This addition exceeds the supported stock limit.",
+                "message": (
+                    "This addition exceeds the supported stock limit."
+                ),
             }), 400
 
         # All quantities remain Decimal values in the database.
@@ -647,7 +659,7 @@ def add_cashier_stock():
         # RECORD STOCK MOVEMENT
         # ----------------------------------------------------
 
-         movement = StockMovement(
+        movement = StockMovement(
             cashier_id=cashier.id,
             product_id=product.id,
             branch_id=branch.id,
@@ -657,7 +669,6 @@ def add_cashier_stock():
             reference=reference or None,
             notes=notes or None,
         )
-
 
         db.session.add(movement)
         db.session.flush()
@@ -731,7 +742,8 @@ def add_cashier_stock():
                 "No changes have been committed."
             ),
         }), 500
-        
+
+
 # ============================================================
 # SHARED ORDERS
 # GET /api/cashier/orders
@@ -1248,9 +1260,7 @@ def assign_cashier_delivery_person(order_id):
 
         return jsonify({
             "status": "success",
-            "message": (
-                "Delivery person assigned successfully."
-            ),
+            "message": "Delivery person assigned successfully.",
             "order": order_data,
         }), 200
 
@@ -1265,9 +1275,7 @@ def assign_cashier_delivery_person(order_id):
 
         return jsonify({
             "status": "error",
-            "message": (
-                "The delivery assignment could not be saved."
-            ),
+            "message": "The delivery assignment could not be saved.",
         }), 409
 
     except Exception:
@@ -1392,9 +1400,7 @@ def update_cashier_delivery_status(order_id):
         if old_status == new_status:
             return jsonify({
                 "status": "success",
-                "message": (
-                    "Delivery status is already up to date."
-                ),
+                "message": "Delivery status is already up to date.",
                 "order": serialize_cashier_order(order),
             }), 200
 
@@ -1557,4 +1563,3 @@ def create_cashier():
             "status": "error",
             "message": "Unable to create cashier account.",
         }), 500
-
