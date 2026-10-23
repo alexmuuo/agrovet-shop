@@ -647,16 +647,19 @@ def add_cashier_stock():
         # RECORD STOCK MOVEMENT
         # ----------------------------------------------------
 
+        
         movement = StockMovement(
             cashier_id=cashier.id,
             product_id=product.id,
-            product_name=product.name,
+            branch_id=branch.id,
             previous_stock=previous_stock,
             quantity_added=quantity,
             new_stock=new_stock,
             reference=reference or None,
             notes=notes or None,
         )
+
+
 
         db.session.add(movement)
         db.session.flush()
