@@ -744,7 +744,122 @@ def add_cashier_stock():
             ),
         }), 500
 
+# ============================================================
+# CASHIER STOCK HISTORY
+# GET /api/cashier/stock/history
+# ============================================================
 
+@cashier_bp.route("/stock/history", methods=["GET", "OPTIONS"])
+@cashier_required
+def get_cashier_stock_history():
+    """
+    Return paginated stock movements for the authenticated
+    cashier's assigned active branch.
+
+    Query parameters:
+        limit  - Number of records per page (default 50, max 100)
+        offset - Number of records to skip (default 0)
+    """
+
+    # --------------------------------------------------------
+    # HANDLE PAGINATION
+    # --------------------------------------------------------
+
+    try:
+        limit = int(request.args.get("limit", 50))
+        offset = int(request.args.get("offset", 0))
+
+        if limit < 1:
+            limit = 50
+
+        limit = min(limit, 100)
+        offset = max(offset, 0)
+
+    except (TypeError, ValueError):
+        return jsonify({
+            "status": "error",
+            "message": "Invalid pagination parameters.",
+        }), 400
+
+    try:
+        # ----------------------------------------------------
+        # AUTHENTICATED CASHIER
+        # ----------------------------------------------------
+
+        cashier = getattr(g, "cashier", None)
+
+        if cashier is None:
+            return jsonify({
+                "status": "error",
+                "message": "Cashier authentication is required.",
+            }), 401
+
+        # ----------------------------------------------------
+        # VERIFY ASSIGNED ACTIVE BRANCH
+        # ----------------------------------------------------
+
+        branch = get_active_cashier_branch(cashier)
+
+        if branch is None:
+            return jsonify({
+                "status": "error",
+                "message": (
+                    "Your account does not have an active "
+                    "assigned branch. Please contact an administrator."
+                ),
+            }), 403
+
+        # ----------------------------------------------------
+        # FETCH THIS CASHIER'S STOCK MOVEMENTS
+        # ----------------------------------------------------
+
+        query = StockMovement.query.filter(
+            StockMovement.cashier_id == cashier.id,
+            StockMovement.branch_id == branch.id,
+        )
+
+        total = query.count()
+
+        movements = (
+            query
+            .order_by(
+                StockMovement.created_at.desc(),
+                StockMovement.id.desc(),
+            )
+            .offset(offset)
+            .limit(limit)
+            .all()
+        )
+
+        # ----------------------------------------------------
+        # SERIALIZE DECIMAL QUANTITIES AND TIMESTAMPS
+        # ----------------------------------------------------
+
+        records = [
+            serialize_stock_movement(movement)
+            for movement in movements
+        ]
+
+        return jsonify({
+            "status": "success",
+            "history": records,
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+        }), 200
+
+    except Exception:
+        logger.exception(
+            "Failed to retrieve stock history for cashier ID %s.",
+            getattr(g, "cashier", None).id
+            if getattr(g, "cashier", None)
+            else None,
+        )
+
+        return jsonify({
+            "status": "error",
+            "message": "Unable to load stock history right now.",
+        }), 500
 # ============================================================
 # SHARED ORDERS
 # GET /api/cashier/orders
