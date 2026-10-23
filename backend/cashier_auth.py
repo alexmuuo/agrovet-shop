@@ -39,14 +39,15 @@ def create_cashier_token(cashier):
         "role": "cashier",
     })
 
-
 def cashier_required(view_function):
     @wraps(view_function)
     def wrapped(*args, **kwargs):
-        authorization = request.headers.get(
-            "Authorization", ""
-        )
+        # Allow browser CORS preflight requests through without
+        # requiring a cashier token. The actual request remains protected.
+        if request.method == "OPTIONS":
+            return "", 204
 
+        authorization = request.headers.get("Authorization", "")
         parts = authorization.split()
 
         if (
@@ -64,7 +65,6 @@ def cashier_required(view_function):
         # Validate the token signature, age, and payload.
         try:
             serializer = get_token_serializer()
-
             cashier_data = serializer.loads(
                 token,
                 max_age=TOKEN_MAX_AGE,
@@ -108,7 +108,7 @@ def cashier_required(view_function):
 
         cashier_id = cashier_data.get("cashier_id")
 
-        # bool is a subclass of int in Python, so reject it explicitly.
+        # Reject invalid IDs, including booleans.
         if (
             not isinstance(cashier_id, int)
             or isinstance(cashier_id, bool)
@@ -125,9 +125,6 @@ def cashier_required(view_function):
 
         except Exception:
             db.session.rollback()
-
-            # Log the underlying exception server-side in a later
-            # logging pass; never expose database details to clients.
             return jsonify({
                 "status": "error",
                 "message": "Unable to verify cashier session.",
