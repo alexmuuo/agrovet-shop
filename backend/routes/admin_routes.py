@@ -94,6 +94,14 @@ def money(value):
     return float(value or Decimal("0.00"))
 
 
+def quantity_number(value):
+    """Serialize quantities while preserving fractional units."""
+    quantity = Decimal(str(value or 0))
+    if quantity == quantity.to_integral_value():
+        return int(quantity)
+    return float(quantity)
+
+
 def get_order_amount(order):
     """Convert an order total into Decimal safely."""
 
@@ -2390,19 +2398,44 @@ def decimal_value(value, default="0.00"):
 
 def get_pos_item_financials(item):
     """
-    Calculate one POS item's financial values.
+    Calculate POS item financial values using Decimal quantities.
 
-    Returns None for invalid quantity or selling price.
-    Missing buying price remains unknown rather than zero.
+    item.quantity is the stock-equivalent quantity consumed.
+    item.sale_quantity is the amount sold in the selected selling unit
+    (for example, one portion). Price is per selling unit, while the
+    historical buying price is per whole stock unit.
+
+    Supports fractional quantities up to three decimal places.
+    Missing historical buying-price snapshots remain unknown, not zero.
     """
+    raw_stock_quantity = getattr(item, "quantity", None)
+    raw_sale_quantity = getattr(item, "sale_quantity", None)
 
-    quantity = getattr(item, "quantity", None)
+    if isinstance(raw_stock_quantity, bool) or raw_stock_quantity is None:
+        return None
 
-    if (
-        isinstance(quantity, bool)
-        or not isinstance(quantity, int)
-        or quantity <= 0
-    ):
+    if raw_sale_quantity is None:
+        # Backward compatibility for older sale-item rows that predate
+        # the separate selling-unit quantity field.
+        raw_sale_quantity = raw_stock_quantity
+
+    if isinstance(raw_sale_quantity, bool):
+        return None
+
+    try:
+        stock_quantity = Decimal(str(raw_stock_quantity))
+        sale_quantity = Decimal(str(raw_sale_quantity))
+
+        if (
+            not stock_quantity.is_finite()
+            or stock_quantity <= Decimal("0")
+            or stock_quantity.as_tuple().exponent < -3
+            or not sale_quantity.is_finite()
+            or sale_quantity <= Decimal("0")
+            or sale_quantity.as_tuple().exponent < -3
+        ):
+            return None
+    except (InvalidOperation, ValueError, TypeError):
         return None
 
     selling_price = decimal_value(
@@ -2413,17 +2446,16 @@ def get_pos_item_financials(item):
     if selling_price < Decimal("0.00"):
         return None
 
-    revenue = selling_price * quantity
+    # Price is per selling unit; quantity is stock-equivalent amount.
+    revenue = selling_price * sale_quantity
 
-    raw_buying_price = getattr(
-        item,
-        "buying_price",
-        None
-    )
+    raw_buying_price = getattr(item, "buying_price", None)
 
     if raw_buying_price is None:
         return {
-            "quantity": quantity,
+            "quantity": stock_quantity,
+            "stock_quantity": stock_quantity,
+            "sale_quantity": sale_quantity,
             "selling_price": selling_price,
             "revenue": revenue,
             "buying_price": None,
@@ -2438,7 +2470,9 @@ def get_pos_item_financials(item):
 
     if buying_price < Decimal("0.00"):
         return {
-            "quantity": quantity,
+            "quantity": stock_quantity,
+            "stock_quantity": stock_quantity,
+            "sale_quantity": sale_quantity,
             "selling_price": selling_price,
             "revenue": revenue,
             "buying_price": None,
@@ -2446,10 +2480,12 @@ def get_pos_item_financials(item):
             "profit": None,
         }
 
-    cost = buying_price * quantity
+    cost = buying_price * stock_quantity
 
     return {
-        "quantity": quantity,
+        "quantity": stock_quantity,
+        "stock_quantity": stock_quantity,
+        "sale_quantity": sale_quantity,
         "selling_price": selling_price,
         "revenue": revenue,
         "buying_price": buying_price,
@@ -2538,7 +2574,9 @@ def get_pos_financial_summary(sales):
         "gross_profit": Decimal("0.00"),
         "known_cost_revenue": Decimal("0.00"),
         "unknown_cost_sales_value": Decimal("0.00"),
-        "quantity_sold": 0,
+        "quantity_sold": Decimal("0"),
+        "stock_quantity_sold": Decimal("0"),
+        "selling_quantity_sold": Decimal("0"),
         "known_cost_item_count": 0,
         "unknown_cost_item_count": 0,
         "known_cost_quantity": 0,
@@ -2567,9 +2605,14 @@ def get_pos_financial_summary(sales):
             continue
 
         quantity = financials["quantity"]
+        sale_quantity = financials["sale_quantity"]
         revenue = financials["revenue"]
 
+        # Keep the legacy quantity_sold field as stock-equivalent quantity,
+        # and expose the customer-facing selling-unit quantity separately.
         summary["quantity_sold"] += quantity
+        summary["stock_quantity_sold"] += quantity
+        summary["selling_quantity_sold"] += sale_quantity
 
         if financials["buying_price"] is None:
             summary["unknown_cost_item_count"] += 1
@@ -2941,7 +2984,8 @@ def get_pos_product_report():
                         if product
                         else "Deleted product"
                     ),
-                    "quantity_sold": 0,
+                    "quantity_sold": Decimal("0"),
+                    "stock_quantity_sold": Decimal("0"),
                     "sales_revenue": Decimal("0.00"),
                     "known_cost_revenue": Decimal("0.00"),
                     "cost_of_goods_sold": Decimal("0.00"),
@@ -2953,7 +2997,8 @@ def get_pos_product_report():
 
             row = products[product_id]
 
-            row["quantity_sold"] += financials["quantity"]
+            row["quantity_sold"] += financials["sale_quantity"]
+            row["stock_quantity_sold"] += financials["stock_quantity"]
             row["sales_revenue"] += financials["revenue"]
 
             if financials["buying_price"] is None:
@@ -2993,7 +3038,10 @@ def get_pos_product_report():
             results.append({
                 "product_id": row["product_id"],
                 "product_name": row["product_name"],
-                "quantity_sold": row["quantity_sold"],
+                "quantity_sold": quantity_number(row["quantity_sold"]),
+                "stock_quantity_sold": quantity_number(
+                    row["stock_quantity_sold"]
+                ),
                 "sales_revenue": money(
                     row["sales_revenue"]
                 ),
@@ -3024,12 +3072,12 @@ def get_pos_product_report():
                 "unknown_cost_sales_value": money(
                     row["unknown_cost_sales_value"]
                 ),
-                "known_cost_quantity": row[
+                "known_cost_quantity": quantity_number(row[
                     "known_cost_quantity"
-                ],
-                "unknown_cost_quantity": row[
+                ]),
+                "unknown_cost_quantity": quantity_number(row[
                     "unknown_cost_quantity"
-                ],
+                ]),
                 "cost_known": cost_complete,
                 "unknown_cost": not cost_complete,
             })
@@ -3050,10 +3098,14 @@ def get_pos_product_report():
             "products": results,
             "product_profit": results,
             "total_products_sold": len(results),
-            "total_quantity_sold": sum(
-                row["quantity_sold"]
-                for row in results
-            ),
+            "total_quantity_sold": quantity_number(sum(
+                (Decimal(str(row["quantity_sold"])) for row in results),
+                Decimal("0")
+            )),
+            "total_stock_quantity_sold": quantity_number(sum(
+                (Decimal(str(row["stock_quantity_sold"])) for row in results),
+                Decimal("0")
+            )),
             "total_sales_revenue": money(
                 sum(
                     (
