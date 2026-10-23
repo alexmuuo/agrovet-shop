@@ -663,6 +663,7 @@ def add_cashier_stock():
             cashier_id=cashier.id,
             product_id=product.id,
             branch_id=branch.id,
+            product_name=product.name,
             previous_stock=previous_stock,
             quantity_added=quantity,
             new_stock=new_stock,
