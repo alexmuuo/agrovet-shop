@@ -6,12 +6,11 @@ from extensions import db
 class StockMovement(db.Model):
     __tablename__ = "stock_movements"
 
-
-id = db.Column(
-    db.Integer,
-    primary_key=True,
-    autoincrement=True
-)
+     id = db.Column(
+        db.Integer,
+        primary_key=True,
+        autoincrement=True
+    )
 
 cashier_id = db.Column(
     db.Integer,
