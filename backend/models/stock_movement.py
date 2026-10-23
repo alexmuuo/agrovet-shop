@@ -32,7 +32,7 @@ product_name = db.Column(
     nullable=False,
 )
 
-# Numeric(12, 3) supports decimal quantities to 3 places.
+# Decimal quantities support fractional stock to 3 decimal places.
 previous_stock = db.Column(
     db.Numeric(12, 3),
     nullable=False,
