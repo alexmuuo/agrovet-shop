@@ -1,30 +1,4 @@
-Claude
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-Stock movement · PY
 from datetime import datetime, timezone
  
 from extensions import db
@@ -144,4 +118,3 @@ class StockMovement(db.Model):
             ),
         }
  
-Claude finished the response
