@@ -19,6 +19,7 @@ const [endDate, setEndDate] = useState("");
 const [loading, setLoading] = useState(true);
 const [error, setError] = useState("");
 const [posError, setPosError] = useState("");
+const [exportingExcel, setExportingExcel] = useState(false);
 
 const [activeReport, setActiveReport] = useState("overview");
 
@@ -329,6 +330,62 @@ loadReports();
 }, [loadReports]);
 
 // =========================================================
+// EXPORT POS REPORTS TO EXCEL
+// Uses the selected date filters and exports cashier POS data only.
+// =========================================================
+
+const exportPosReportsToExcel = async () => {
+  setExportingExcel(true);
+  setPosError("");
+
+  try {
+    const params = {};
+    if (startDate) params.start_date = startDate;
+    if (endDate) params.end_date = endDate;
+
+    const response = await api.get("/admin/reports/pos/export.xlsx", {
+      params,
+      responseType: "blob",
+    });
+
+    const blob = new Blob([response.data], {
+      type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    });
+
+    const downloadUrl = window.URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    const datePart = new Date().toISOString().slice(0, 10);
+
+    link.href = downloadUrl;
+    link.download = `Headmaster_POS_Reports_${datePart}.xlsx`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    window.URL.revokeObjectURL(downloadUrl);
+  } catch (err) {
+    let message =
+      err?.response?.data?.message ||
+      err?.message ||
+      "Could not export the POS reports to Excel.";
+
+    // JSON error responses can arrive as a Blob when responseType is "blob".
+    if (err?.response?.data instanceof Blob) {
+      try {
+        const errorText = await err.response.data.text();
+        const errorData = JSON.parse(errorText);
+        message = errorData?.message || message;
+      } catch {
+        // Keep the fallback message if the response is not JSON.
+      }
+    }
+
+    setPosError(message);
+  } finally {
+    setExportingExcel(false);
+  }
+};
+
+// =========================================================
 // NORMALIZE RESPONSE DATA
 // =========================================================
 
@@ -570,19 +627,36 @@ Reports & Analytics </h2>
       </p>
     </div>
 
-    <button
-      type="button"
-      className="btn btn-success"
-      onClick={loadReports}
-      disabled={loading}
-    >
-      <i
-        className={`bi ${
-          loading ? "bi-arrow-repeat" : "bi-arrow-clockwise"
-        } me-2`}
-      ></i>
-      {loading ? "Refreshing..." : "Refresh Reports"}
-    </button>
+    <div className="d-flex flex-wrap gap-2">
+      <button
+        type="button"
+        className="btn btn-outline-success"
+        onClick={exportPosReportsToExcel}
+        disabled={exportingExcel}
+        title="Export POS sales, items, payments, branch performance, and product performance to Excel"
+      >
+        <i
+          className={`bi ${
+            exportingExcel ? "bi-arrow-repeat" : "bi-file-earmark-excel"
+          } me-2`}
+        ></i>
+        {exportingExcel ? "Preparing Excel..." : "Export POS Reports to Excel"}
+      </button>
+
+      <button
+        type="button"
+        className="btn btn-success"
+        onClick={loadReports}
+        disabled={loading}
+      >
+        <i
+          className={`bi ${
+            loading ? "bi-arrow-repeat" : "bi-arrow-clockwise"
+          } me-2`}
+        ></i>
+        {loading ? "Refreshing..." : "Refresh Reports"}
+      </button>
+    </div>
   </div>
 
   {/* DATE FILTERS */}
