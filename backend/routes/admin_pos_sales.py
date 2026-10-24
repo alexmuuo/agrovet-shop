@@ -1144,13 +1144,24 @@ def void_pos_sale(sale_id):
                 + old_quantities[product_id]
             )
 
-        # Mark the sale as voided.
+              # Mark the sale as voided.
         sale.status = "voided"
 
-        # Do not mark payments as refunded.
-        # Preserve all payment records for reconciliation.
-        db.session.flush()
+        # Automatically void successful payment records.
+        # This is an accounting status change only; it does not
+        # initiate an actual M-Pesa or cash refund.
+        voided_payment_count = 0
 
+        for payment in sale.payments:
+            if payment_is_successful(payment):
+                payment.status = "voided"
+                voided_payment_count += 1
+
+        # Keep the sale-level payment status consistent.
+        if voided_payment_count > 0:
+            sale.payment_status = "voided"
+
+        db.session.flush()
         after_data = sale_snapshot(sale)
 
         audit_sale(
@@ -1173,9 +1184,10 @@ def void_pos_sale(sale_id):
         return jsonify({
             "status": "success",
             "message": (
-                "POS sale voided and branch stock restored. "
-                "Payment records were preserved."
-            ),
+    "POS sale voided, branch stock restored, and "
+    f"{voided_payment_count} successful payment record(s) "
+    "marked as voided. "
+),
             "sale": sale_snapshot(sale),
             "refund_required_review": has_successful_payment,
             "payment_notice": (
