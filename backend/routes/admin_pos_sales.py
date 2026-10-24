@@ -1,9 +1,9 @@
 import logging
 from datetime import datetime, timedelta
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
 from flask import Blueprint, jsonify, request, g
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import selectinload
 
@@ -31,31 +31,130 @@ logger = logging.getLogger(__name__)
 
 CENT = Decimal("0.01")
 ZERO = Decimal("0.00")
+QUANTITY_STEP = Decimal("0.001")
 MAX_REASON_LENGTH = 2000
 
 
 # ============================================================
-# HELPERS
+# DECIMAL AND JSON HELPERS
 # ============================================================
 
-def money(value):
-    """Convert a value to a two-decimal-place Decimal."""
+def decimal_value(value, default="0"):
+    """Convert a numeric value to a finite Decimal."""
     try:
-        result = Decimal(
-            str(value if value is not None else "0.00")
-        )
+        result = Decimal(str(value if value is not None else default))
 
         if not result.is_finite():
             raise InvalidOperation
 
-        return result.quantize(CENT)
+        return result
 
+    except (InvalidOperation, ValueError, TypeError):
+        raise ValueError("Invalid numeric value.")
+
+
+def money(value):
+    """Convert a monetary value to two decimal places."""
+    try:
+        return decimal_value(value, "0.00").quantize(
+            CENT,
+            rounding=ROUND_HALF_UP,
+        )
     except (InvalidOperation, ValueError, TypeError):
         raise ValueError("Invalid monetary value.")
 
 
+def quantity_value(value):
+    """Convert a quantity to three decimal places."""
+    try:
+        result = decimal_value(value)
+
+        if result < 0:
+            raise ValueError("Quantity cannot be negative.")
+
+        quantized = result.quantize(
+            QUANTITY_STEP,
+            rounding=ROUND_HALF_UP,
+        )
+
+        if result != quantized:
+            raise ValueError(
+                "Quantity cannot have more than three decimal places."
+            )
+
+        return quantized
+
+    except (InvalidOperation, ValueError, TypeError):
+        raise ValueError("Invalid quantity.")
+
+
+def json_number(value):
+    """
+    Convert Decimal values into JSON-compatible numbers.
+
+    Decimal quantities and monetary values must not be passed
+    directly into JSONB audit fields.
+    """
+    if value is None:
+        return None
+
+    if isinstance(value, Decimal):
+        return float(value)
+
+    if isinstance(value, bool):
+        return value
+
+    if isinstance(value, int):
+        return value
+
+    if isinstance(value, float):
+        return value
+
+    try:
+        return float(value)
+    except (ValueError, TypeError, OverflowError):
+        return str(value)
+
+
+def json_safe(value):
+    """
+    Recursively convert values to JSON-compatible values.
+
+    This protects audit JSON fields against Decimal objects,
+    datetimes, and other common non-JSON-native values.
+    """
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+
+    if isinstance(value, Decimal):
+        return float(value)
+
+    if isinstance(value, float):
+        return value
+
+    if isinstance(value, datetime):
+        return value.isoformat()
+
+    if isinstance(value, dict):
+        return {
+            str(key): json_safe(item)
+            for key, item in value.items()
+        }
+
+    if isinstance(value, (list, tuple, set)):
+        return [json_safe(item) for item in value]
+
+    if hasattr(value, "isoformat"):
+        try:
+            return value.isoformat()
+        except (TypeError, ValueError):
+            pass
+
+    return str(value)
+
+
 def json_money(value):
-    """Convert monetary values into JSON-compatible numbers."""
+    """Convert money to a JSON-compatible number."""
     return float(money(value))
 
 
@@ -71,6 +170,10 @@ def error_response(message, status_code):
         "message": message,
     }), status_code
 
+
+# ============================================================
+# ADMIN AND VALIDATION HELPERS
+# ============================================================
 
 def get_admin_username():
     """Return the authenticated administrator's username."""
@@ -96,6 +199,9 @@ def validate_reason(data):
 
     reason = reason.strip()
 
+    if len(reason) < 5:
+        return None, "The reason must contain at least 5 characters."
+
     if len(reason) > MAX_REASON_LENGTH:
         return None, (
             f"The reason must not exceed "
@@ -105,14 +211,84 @@ def validate_reason(data):
     return reason, None
 
 
+def validate_sale_id(sale_id):
+    """Reject invalid sale identifiers."""
+    if isinstance(sale_id, bool) or sale_id <= 0:
+        return error_response("Invalid POS sale ID.", 400)
+
+    return None
+
+
+def parse_positive_quantity(value):
+    """Parse a positive quantity allowing up to three decimal places."""
+    if isinstance(value, bool) or value is None:
+        raise ValueError("Quantity must be a positive number.")
+
+    try:
+        result = quantity_value(value)
+    except ValueError:
+        raise ValueError(
+            "Quantity must be a positive number with up to "
+            "three decimal places."
+        )
+
+    if result <= 0:
+        raise ValueError("Quantity must be greater than zero.")
+
+    return result
+
+
+# ============================================================
+# SALE SNAPSHOTS AND AUDIT HELPERS
+# ============================================================
+
 def sale_snapshot(sale):
     """
-    Create a detailed snapshot of a POS sale.
+    Create a JSON-safe snapshot of a POS sale.
 
-    This deliberately serializes CashierSale records rather than
-    website Order records.
+    This records CashierSale data, not website Order data.
     """
-    return {
+    items = []
+
+    for item in sale.items:
+        quantity = quantity_value(item.quantity)
+        unit_price = money(item.price)
+
+        items.append({
+            "id": item.id,
+            "product_id": item.product_id,
+            "product_name": (
+                item.product.name
+                if item.product is not None
+                else None
+            ),
+            "quantity": float(quantity),
+            "price": json_money(unit_price),
+            "buying_price": (
+                json_money(item.buying_price)
+                if item.buying_price is not None
+                else None
+            ),
+            "subtotal": json_money(unit_price * quantity),
+        })
+
+    payments = []
+
+    for payment in sale.payments:
+        payments.append({
+            "id": payment.id,
+            "payment_method": payment.payment_method,
+            "amount": json_money(payment.amount),
+            "status": payment.status,
+            "mpesa_receipt_number": payment.mpesa_receipt_number,
+            "created_at": (
+                payment.created_at.isoformat()
+                if payment.created_at is not None
+                else None
+            ),
+        })
+
+    snapshot = {
         "id": sale.id,
         "sale_number": sale.sale_number,
         "branch_id": sale.branch_id,
@@ -131,46 +307,34 @@ def sale_snapshot(sale):
         "payment_method": sale.payment_method,
         "payment_status": sale.payment_status,
         "status": sale.status,
-        "items": [
-            {
-                "id": item.id,
-                "product_id": item.product_id,
-                "product_name": (
-                    item.product.name
-                    if item.product is not None
-                    else None
-                ),
-                "quantity": item.quantity,
-                "price": json_money(item.price),
-                "buying_price": (
-                    json_money(item.buying_price)
-                    if item.buying_price is not None
-                    else None
-                ),
-                "subtotal": json_money(
-                    money(item.price) * item.quantity
-                ),
-            }
-            for item in sale.items
-        ],
-        "payments": [
-            {
-                "id": payment.id,
-                "payment_method": payment.payment_method,
-                "amount": json_money(payment.amount),
-                "status": payment.status,
-                "mpesa_receipt_number": (
-                    payment.mpesa_receipt_number
-                ),
-                "created_at": (
-                    payment.created_at.isoformat()
-                    if payment.created_at is not None
-                    else None
-                ),
-            }
-            for payment in sale.payments
-        ],
+        "items": items,
+        "payments": payments,
     }
+
+    return json_safe(snapshot)
+
+
+def audit_to_dict(audit):
+    """Serialize an audit row safely for an API response."""
+    if hasattr(audit, "to_dict"):
+        data = audit.to_dict()
+    else:
+        data = {
+            "id": audit.id,
+            "sale_id": audit.sale_id,
+            "admin_username": audit.admin_username,
+            "action": audit.action,
+            "reason": audit.reason,
+            "created_at": (
+                audit.created_at.isoformat()
+                if audit.created_at is not None
+                else None
+            ),
+            "before_data": audit.before_data,
+            "after_data": audit.after_data,
+        }
+
+    return json_safe(data)
 
 
 def lock_sale(sale_id):
@@ -197,7 +361,7 @@ def lock_branch_stock(branch_id, product_ids):
     """
     Lock branch-specific stock records in product-ID order.
 
-    Inventory is taken from BranchProductStock, not Product.stock.
+    POS inventory is held in BranchProductStock, not Product.stock.
     """
     if not product_ids:
         return {}
@@ -250,25 +414,17 @@ def audit_sale(
     before_data,
     after_data,
 ):
-    """Record an administrator action in the sale audit history."""
+    """Record an administrator action using JSON-safe snapshots."""
     db.session.add(
         CashierSaleAudit(
             sale_id=sale.id,
             admin_username=username,
             action=action,
             reason=reason,
-            before_data=before_data,
-            after_data=after_data,
+            before_data=json_safe(before_data),
+            after_data=json_safe(after_data),
         )
     )
-
-
-def validate_sale_id(sale_id):
-    """Reject invalid sale identifiers."""
-    if isinstance(sale_id, bool) or sale_id <= 0:
-        return error_response("Invalid POS sale ID.", 400)
-
-    return None
 
 
 # ============================================================
@@ -295,42 +451,27 @@ def list_pos_sales():
         start_date = request.args.get("start_date")
         end_date = request.args.get("end_date")
 
-        # ----------------------------------------------------
         # SEARCH
-        # ----------------------------------------------------
-
         if search:
             pattern = f"%{search}%"
 
             query = (
                 query
-                .join(
-                    CashierSale.branch
-                )
-                .join(
-                    CashierSale.cashier
-                )
+                .join(CashierSale.branch)
+                .join(CashierSale.cashier)
                 .filter(
                     or_(
                         CashierSale.sale_number.ilike(pattern),
                         Branch.name.ilike(pattern),
                         CashierSale.cashier.has(
-                            or_(
-                                # Include cashier full names.
-                                # Adjust the username field if your
-                                # Cashier model uses another name.
-                                CashierSale.cashier.property.mapper
-                                .class_.full_name.ilike(pattern),
-                            )
+                            CashierSale.cashier.property.mapper
+                            .class_.full_name.ilike(pattern)
                         ),
                     )
                 )
             )
 
-        # ----------------------------------------------------
         # FILTERS
-        # ----------------------------------------------------
-
         if status:
             query = query.filter(
                 func.lower(CashierSale.status) == status
@@ -358,13 +499,13 @@ def list_pos_sales():
                 CashierSale.cashier_id == cashier_id
             )
 
-        # ----------------------------------------------------
         # DATE FILTERS
-        # ----------------------------------------------------
+        parsed_start = None
+        parsed_end = None
 
         if start_date:
             try:
-                start = datetime.strptime(
+                parsed_start = datetime.strptime(
                     start_date,
                     "%Y-%m-%d",
                 )
@@ -375,12 +516,12 @@ def list_pos_sales():
                 )
 
             query = query.filter(
-                CashierSale.created_at >= start
+                CashierSale.created_at >= parsed_start
             )
 
         if end_date:
             try:
-                end = datetime.strptime(
+                parsed_end = datetime.strptime(
                     end_date,
                     "%Y-%m-%d",
                 )
@@ -392,30 +533,22 @@ def list_pos_sales():
 
             query = query.filter(
                 CashierSale.created_at
-                < end + timedelta(days=1)
+                < parsed_end + timedelta(days=1)
             )
 
-        if start_date and end_date and start_date > end_date:
+        if (
+            parsed_start is not None
+            and parsed_end is not None
+            and parsed_start.date() > parsed_end.date()
+        ):
             return error_response(
                 "start_date cannot be later than end_date.",
                 400,
             )
 
-        # ----------------------------------------------------
         # PAGINATION
-        # ----------------------------------------------------
-
-        page = request.args.get(
-            "page",
-            default=1,
-            type=int,
-        )
-
-        per_page = request.args.get(
-            "per_page",
-            default=50,
-            type=int,
-        )
+        page = request.args.get("page", default=1, type=int)
+        per_page = request.args.get("per_page", default=50, type=int)
 
         if page < 1 or per_page < 1:
             return error_response(
@@ -441,7 +574,7 @@ def list_pos_sales():
         return jsonify({
             "status": "success",
             "sales": [
-                sale.to_dict()
+                json_safe(sale.to_dict())
                 for sale in pagination.items
             ],
             "pagination": {
@@ -455,9 +588,7 @@ def list_pos_sales():
     except Exception:
         db.session.rollback()
 
-        logger.exception(
-            "Failed to list POS sales."
-        )
+        logger.exception("Failed to list POS sales.")
 
         return error_response(
             "Unable to retrieve POS sales.",
@@ -515,7 +646,7 @@ def get_pos_sale(sale_id):
             "status": "success",
             "sale": sale_snapshot(sale),
             "audit_history": [
-                audit.to_dict()
+                audit_to_dict(audit)
                 for audit in audits
             ],
         }), 200
@@ -538,19 +669,6 @@ def get_pos_sale(sale_id):
 # EDIT POS SALE
 #
 # PUT /api/admin/pos-sales/<int:sale_id>
-#
-# Request:
-#
-# {
-#     "reason": "Corrected quantities",
-#     "items": [
-#         {"product_id": 1, "quantity": 2},
-#         {"product_id": 4, "quantity": 3}
-#     ]
-# }
-#
-# Editing replaces the sale's item lines.
-# It does not modify website orders.
 # ============================================================
 
 @admin_pos_sales_bp.route(
@@ -583,10 +701,7 @@ def edit_pos_sale(sale_id):
     reason, reason_error = validate_reason(data)
 
     if reason_error:
-        return error_response(
-            reason_error,
-            400,
-        )
+        return error_response(reason_error, 400)
 
     requested_items = data.get("items")
 
@@ -596,10 +711,7 @@ def edit_pos_sale(sale_id):
             400,
         )
 
-    # --------------------------------------------------------
-    # VALIDATE AND COMBINE REQUESTED QUANTITIES
-    # --------------------------------------------------------
-
+    # Validate and combine requested quantities.
     combined_quantities = {}
 
     for entry in requested_items:
@@ -610,7 +722,6 @@ def edit_pos_sale(sale_id):
             )
 
         product_id = entry.get("product_id")
-        quantity = entry.get("quantity")
 
         if (
             isinstance(product_id, bool)
@@ -622,33 +733,23 @@ def edit_pos_sale(sale_id):
                 400,
             )
 
-        if (
-            isinstance(quantity, bool)
-            or not isinstance(quantity, int)
-            or quantity <= 0
-        ):
-            return error_response(
-                "Each quantity must be a positive integer.",
-                400,
+        try:
+            quantity = parse_positive_quantity(
+                entry.get("quantity")
             )
+        except ValueError as exc:
+            return error_response(str(exc), 400)
 
         combined_quantities[product_id] = (
-            combined_quantities.get(product_id, 0)
+            combined_quantities.get(product_id, Decimal("0"))
             + quantity
         )
 
     try:
-        # ----------------------------------------------------
-        # LOCK AND VALIDATE SALE
-        # ----------------------------------------------------
-
         sale = lock_sale(sale_id)
 
         if sale is None:
-            return error_response(
-                "POS sale not found.",
-                404,
-            )
+            return error_response("POS sale not found.", 404)
 
         if normalize(sale.status) in {
             "voided",
@@ -681,10 +782,7 @@ def edit_pos_sale(sale_id):
                 409,
             )
 
-        branch = db.session.get(
-            Branch,
-            sale.branch_id,
-        )
+        branch = db.session.get(Branch, sale.branch_id)
 
         if branch is None:
             return error_response(
@@ -692,34 +790,26 @@ def edit_pos_sale(sale_id):
                 409,
             )
 
-        # ----------------------------------------------------
-        # CALCULATE ORIGINAL QUANTITIES
-        # ----------------------------------------------------
-
+        # Original item quantities.
         original_items = list(sale.items)
-
         old_quantities = {}
 
         for item in original_items:
+            item_quantity = quantity_value(item.quantity)
+
             old_quantities[item.product_id] = (
-                old_quantities.get(item.product_id, 0)
-                + item.quantity
+                old_quantities.get(item.product_id, Decimal("0"))
+                + item_quantity
             )
 
         affected_product_ids = sorted(
-            set(old_quantities)
-            | set(combined_quantities)
+            set(old_quantities) | set(combined_quantities)
         )
 
-        # ----------------------------------------------------
-        # LOCK PRODUCTS
-        # ----------------------------------------------------
-
+        # Lock affected products.
         products = db.session.execute(
             select(Product)
-            .where(
-                Product.id.in_(affected_product_ids)
-            )
+            .where(Product.id.in_(affected_product_ids))
             .order_by(Product.id)
             .with_for_update()
         ).scalars().all()
@@ -741,10 +831,7 @@ def edit_pos_sale(sale_id):
                 409,
             )
 
-        # ----------------------------------------------------
-        # LOCK BRANCH-SPECIFIC STOCK
-        # ----------------------------------------------------
-
+        # Lock branch-specific stock.
         stock_by_product = lock_branch_stock(
             sale.branch_id,
             affected_product_ids,
@@ -753,66 +840,51 @@ def edit_pos_sale(sale_id):
         for product_id in old_quantities:
             if product_id not in stock_by_product:
                 return error_response(
-                    "Branch stock is missing for an existing "
-                    "sale item. Resolve the inventory "
-                    "discrepancy before editing.",
+                    "Branch stock is missing for an existing sale item. "
+                    "Resolve the inventory discrepancy before editing.",
                     409,
                 )
 
-        # ----------------------------------------------------
-        # CALCULATE STOCK CHANGES
-        #
-        # Positive delta restores stock.
-        # Negative delta consumes additional stock.
-        # ----------------------------------------------------
-
+        # Calculate stock deltas.
         stock_changes = {}
 
         for product_id in affected_product_ids:
             old_quantity = old_quantities.get(
                 product_id,
-                0,
+                Decimal("0"),
             )
 
             new_quantity = combined_quantities.get(
                 product_id,
-                0,
+                Decimal("0"),
             )
 
             delta = old_quantity - new_quantity
-
             stock = stock_by_product.get(product_id)
 
             if delta < 0:
                 if stock is None:
                     return error_response(
-                        "Branch stock is missing for a "
-                        "newly added product.",
+                        "Branch stock is missing for a newly added product.",
                         409,
                     )
 
-                if stock.quantity < abs(delta):
+                current_stock = quantity_value(stock.quantity)
+
+                if current_stock < abs(delta):
                     product = products_by_id[product_id]
 
                     return error_response(
-                        f"Insufficient branch stock for "
-                        f"{product.name}.",
+                        f"Insufficient branch stock for {product.name}.",
                         409,
                     )
 
             if delta != 0:
                 stock_changes[product_id] = delta
 
-        # ----------------------------------------------------
-        # CAPTURE BEFORE SNAPSHOT
-        # ----------------------------------------------------
-
         before_data = sale_snapshot(sale)
 
-        # ----------------------------------------------------
-        # BUILD REPLACEMENT ITEMS
-        # ----------------------------------------------------
-
+        # Build replacement sale items.
         new_total = ZERO
         new_items = []
 
@@ -823,8 +895,8 @@ def edit_pos_sale(sale_id):
 
             if getattr(product, "is_active", True) is False:
                 return error_response(
-                    f"{product.name} is inactive and cannot "
-                    "be added to an edited sale.",
+                    f"{product.name} is inactive and cannot be added "
+                    "to an edited sale.",
                     409,
                 )
 
@@ -844,10 +916,7 @@ def edit_pos_sale(sale_id):
                     else None
                 )
 
-                if (
-                    buying_price is not None
-                    and buying_price < ZERO
-                ):
+                if buying_price is not None and buying_price < ZERO:
                     return error_response(
                         f"The buying price for {product.name} "
                         "cannot be negative.",
@@ -856,8 +925,7 @@ def edit_pos_sale(sale_id):
 
             except ValueError:
                 return error_response(
-                    f"The price configuration for "
-                    f"{product.name} is invalid.",
+                    f"The price configuration for {product.name} is invalid.",
                     409,
                 )
 
@@ -872,27 +940,34 @@ def edit_pos_sale(sale_id):
                 )
             )
 
-        new_total = new_total.quantize(CENT)
+        new_total = new_total.quantize(
+            CENT,
+            rounding=ROUND_HALF_UP,
+        )
 
-        # ----------------------------------------------------
-        # APPLY STOCK CHANGES
-        # ----------------------------------------------------
-
+        # Apply branch stock changes.
         for product_id, delta in stock_changes.items():
             stock = stock_by_product.get(product_id)
 
             if stock is None:
+                if delta < 0:
+                    return error_response(
+                        "Branch stock is missing for a newly added product.",
+                        409,
+                    )
+
                 stock = BranchProductStock(
                     branch_id=sale.branch_id,
                     product_id=product_id,
-                    quantity=0,
+                    quantity=Decimal("0.000"),
                 )
 
                 db.session.add(stock)
-
                 stock_by_product[product_id] = stock
 
-            stock.quantity += delta
+            stock.quantity = (
+                quantity_value(stock.quantity) + delta
+            )
 
             if stock.quantity < 0:
                 db.session.rollback()
@@ -902,12 +977,8 @@ def edit_pos_sale(sale_id):
                     409,
                 )
 
-        # ----------------------------------------------------
-        # REPLACE SALE ITEMS
-        # ----------------------------------------------------
-
+        # Replace sale items.
         sale.items.clear()
-
         db.session.flush()
 
         for item in new_items:
@@ -917,10 +988,7 @@ def edit_pos_sale(sale_id):
 
         db.session.flush()
 
-        # ----------------------------------------------------
-        # AUDIT AND COMMIT
-        # ----------------------------------------------------
-
+        # Audit and commit.
         after_data = sale_snapshot(sale)
 
         audit_sale(
@@ -949,8 +1017,8 @@ def edit_pos_sale(sale_id):
         )
 
         return error_response(
-            "The sale could not be updated because of a "
-            "database constraint. No changes were saved.",
+            "The sale could not be updated because of a database "
+            "constraint. No changes were saved.",
             409,
         )
 
@@ -963,8 +1031,7 @@ def edit_pos_sale(sale_id):
         )
 
         return error_response(
-            "Unable to update the POS sale. "
-            "No changes were saved.",
+            "Unable to update the POS sale. No changes were saved.",
             500,
         )
 
@@ -973,11 +1040,6 @@ def edit_pos_sale(sale_id):
 # VOID POS SALE
 #
 # POST /api/admin/pos-sales/<int:sale_id>/void
-#
-# Request:
-# {
-#     "reason": "Duplicate transaction"
-# }
 #
 # Voiding is not a refund.
 # Payment records are preserved.
@@ -1013,23 +1075,14 @@ def void_pos_sale(sale_id):
     reason, reason_error = validate_reason(data)
 
     if reason_error:
-        return error_response(
-            reason_error,
-            400,
-        )
+        return error_response(reason_error, 400)
 
     try:
-        # ----------------------------------------------------
-        # LOCK AND VALIDATE SALE
-        # ----------------------------------------------------
-
+        # Lock and validate the sale.
         sale = lock_sale(sale_id)
 
         if sale is None:
-            return error_response(
-                "POS sale not found.",
-                404,
-            )
+            return error_response("POS sale not found.", 404)
 
         if normalize(sale.status) in {
             "voided",
@@ -1049,20 +1102,20 @@ def void_pos_sale(sale_id):
 
         before_data = sale_snapshot(sale)
 
-        # ----------------------------------------------------
-        # CALCULATE QUANTITIES TO RESTORE
-        # ----------------------------------------------------
-
+        # Calculate quantities to restore using Decimal arithmetic.
         old_quantities = {}
 
         for item in sale.items:
+            item_quantity = quantity_value(item.quantity)
+
             old_quantities[item.product_id] = (
-                old_quantities.get(item.product_id, 0)
-                + item.quantity
+                old_quantities.get(item.product_id, Decimal("0"))
+                + item_quantity
             )
 
         product_ids = sorted(old_quantities)
 
+        # Lock the branch stock records.
         stock_by_product = lock_branch_stock(
             sale.branch_id,
             product_ids,
@@ -1076,31 +1129,26 @@ def void_pos_sale(sale_id):
 
         if missing_stock:
             return error_response(
-                "Stock could not be restored because one or "
-                "more branch stock records are missing. "
-                "Resolve the inventory discrepancy before "
-                "voiding this sale.",
+                "Stock could not be restored because one or more "
+                "branch stock records are missing. Resolve the "
+                "inventory discrepancy before voiding this sale.",
                 409,
             )
 
-        # ----------------------------------------------------
-        # RESTORE BRANCH STOCK
-        # ----------------------------------------------------
-
+        # Restore branch stock.
         for product_id in product_ids:
             stock = stock_by_product[product_id]
 
-            stock.quantity += old_quantities[product_id]
+            stock.quantity = (
+                quantity_value(stock.quantity)
+                + old_quantities[product_id]
+            )
 
-        # ----------------------------------------------------
-        # MARK SALE AS VOIDED
-        # ----------------------------------------------------
-
+        # Mark the sale as voided.
         sale.status = "voided"
 
         # Do not mark payments as refunded.
         # Preserve all payment records for reconciliation.
-
         db.session.flush()
 
         after_data = sale_snapshot(sale)
@@ -1114,13 +1162,13 @@ def void_pos_sale(sale_id):
             after_data=after_data,
         )
 
-        # Calculate before commit so the response reflects
-        # the payment records associated with this sale.
-        has_successful_payment = sale_has_successful_payment(
-            sale
-        )
+        has_successful_payment = sale_has_successful_payment(sale)
 
+        # The audit snapshots are already JSON-safe here.
         db.session.commit()
+
+        # Refresh committed state before creating the response.
+        db.session.refresh(sale)
 
         return jsonify({
             "status": "success",
@@ -1136,9 +1184,8 @@ def void_pos_sale(sale_id):
                 "Reconcile the payment separately."
                 if has_successful_payment
                 else (
-                    "No successful payment record was "
-                    "identified. Verify the payment status "
-                    "before closing reconciliation."
+                    "No successful payment record was identified. "
+                    "Verify the payment status before closing reconciliation."
                 )
             ),
         }), 200
@@ -1152,8 +1199,8 @@ def void_pos_sale(sale_id):
         )
 
         return error_response(
-            "The sale could not be voided because of a "
-            "database constraint. No changes were saved.",
+            "The sale could not be voided because of a database "
+            "constraint. No changes were saved.",
             409,
         )
 
@@ -1166,7 +1213,7 @@ def void_pos_sale(sale_id):
         )
 
         return error_response(
-            "Unable to void the POS sale. "
-            "No changes were saved.",
+            "Unable to void the POS sale. No changes were saved.",
             500,
         )
+
