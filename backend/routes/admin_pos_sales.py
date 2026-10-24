@@ -1191,15 +1191,15 @@ def void_pos_sale(sale_id):
             "sale": sale_snapshot(sale),
             "refund_required_review": has_successful_payment,
             "payment_notice": (
-                "This sale has a successful payment record. "
-                "Voiding did not issue or confirm a refund. "
-                "Reconcile the payment separately."
-                if has_successful_payment
-                else (
-                    "No successful payment record was identified. "
-                    "Verify the payment status before closing reconciliation."
-                )
-            ),
+    "Successful payment records were marked as voided for "
+    "accounting purposes. This does not confirm that money "
+    "was returned to the customer."
+    if voided_payment_count > 0
+    else (
+        "No successful payment records were found to void. "
+        "Verify the payment status if necessary."
+    )
+),
         }), 200
 
     except IntegrityError:
