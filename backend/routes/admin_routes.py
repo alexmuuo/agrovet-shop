@@ -3460,8 +3460,7 @@ def get_all_admin_pos_sales():
 #   end_date=YYYY-MM-DD
 #   branch_id=<integer>
 #
-# This workbook is based on cashier POS records only. Website
-# orders are deliberately excluded.
+# Cashier POS records only. Website orders are excluded.
 # ============================================================
 
 @admin_bp.route(
@@ -3471,6 +3470,8 @@ def get_all_admin_pos_sales():
 @admin_required
 def export_all_pos_reports_excel():
     try:
+        from datetime import datetime, date, time
+
         start_date, end_date = parse_report_dates()
 
         branch_id = request.args.get("branch_id", type=int)
@@ -3480,7 +3481,12 @@ def export_all_pos_reports_excel():
                 "message": "Invalid branch ID.",
             }), 400
 
+        # ----------------------------------------------------
+        # FETCH POS SALES
+        # ----------------------------------------------------
+
         sales_query = get_filtered_pos_sales(start_date, end_date)
+
         if branch_id is not None:
             sales_query = sales_query.filter(
                 CashierSale.branch_id == branch_id
@@ -3492,29 +3498,47 @@ def export_all_pos_reports_excel():
         ).all()
 
         all_sale_ids = [sale.id for sale in all_sales]
+
         items = get_pos_report_items(all_sales)
-        paid_sales = [sale for sale in all_sales if pos_sale_is_paid(sale)]
+
+        paid_sales = [
+            sale for sale in all_sales
+            if pos_sale_is_paid(sale)
+        ]
+
         paid_sale_ids = {sale.id for sale in paid_sales}
+
         void_sales = [
             sale for sale in all_sales
             if normalize_status(getattr(sale, "status", None))
             in POS_INACTIVE_SALE_STATUSES
         ]
 
-        # Fetch payment records for every sale, including pending/failed
-        # records, so the workbook can also support reconciliation.
+        # ----------------------------------------------------
+        # FETCH PAYMENTS
+        # ----------------------------------------------------
+
         payments = []
+
         if all_sale_ids:
             payments = CashierSalePayment.query.filter(
                 CashierSalePayment.sale_id.in_(all_sale_ids)
-            ).order_by(CashierSalePayment.id.asc()).all()
+            ).order_by(
+                CashierSalePayment.id.asc()
+            ).all()
+
+        # ----------------------------------------------------
+        # FETCH RELATED PRODUCTS
+        # ----------------------------------------------------
 
         product_ids = {
             getattr(item, "product_id", None)
             for item in items
             if getattr(item, "product_id", None) is not None
         }
+
         product_map = {}
+
         if product_ids:
             product_map = {
                 product.id: product
@@ -3523,12 +3547,18 @@ def export_all_pos_reports_excel():
                 ).all()
             }
 
+        # ----------------------------------------------------
+        # FETCH BRANCHES
+        # ----------------------------------------------------
+
         branch_ids = {
             getattr(sale, "branch_id", None)
             for sale in all_sales
             if getattr(sale, "branch_id", None) is not None
         }
+
         branch_map = {}
+
         if branch_ids:
             branch_map = {
                 branch.id: branch
@@ -3537,12 +3567,18 @@ def export_all_pos_reports_excel():
                 ).all()
             }
 
+        # ----------------------------------------------------
+        # FETCH CASHIERS
+        # ----------------------------------------------------
+
         cashier_ids = {
             getattr(sale, "cashier_id", None)
             for sale in all_sales
             if getattr(sale, "cashier_id", None) is not None
         }
+
         cashier_map = {}
+
         if cashier_ids:
             cashier_map = {
                 cashier.id: cashier
@@ -3551,9 +3587,15 @@ def export_all_pos_reports_excel():
                 ).all()
             }
 
+        # ----------------------------------------------------
+        # CREATE WORKBOOK
+        # ----------------------------------------------------
+
         workbook = Workbook()
+
         summary_ws = workbook.active
         summary_ws.title = "Sales Summary"
+
         sales_ws = workbook.create_sheet("Sales Records")
         items_ws = workbook.create_sheet("Sale Items")
         payments_ws = workbook.create_sheet("Payments")
@@ -3563,50 +3605,127 @@ def export_all_pos_reports_excel():
 
         title_fill = PatternFill("solid", fgColor="17365D")
         title_font = Font(color="FFFFFF", bold=True)
+
         header_fill = PatternFill("solid", fgColor="D9EAF7")
         header_font = Font(bold=True, color="17365D")
 
+        # ----------------------------------------------------
+        # EXCEL-SAFE VALUE CONVERSION
+        # ----------------------------------------------------
+
+        def make_excel_safe(value):
+            """
+            Convert timezone-aware date/time values into values
+            Excel supports. This does not modify database values.
+            """
+
+            if isinstance(value, datetime):
+                if value.tzinfo is not None:
+                    return value.replace(tzinfo=None)
+                return value
+
+            if isinstance(value, time):
+                if value.tzinfo is not None:
+                    return value.replace(tzinfo=None)
+                return value
+
+            if isinstance(value, date):
+                return value
+
+            if isinstance(value, Decimal):
+                return float(value)
+
+            return value
+
+        def safe_datetime(value):
+            if value is None:
+                return None
+
+            if isinstance(value, (datetime, date)):
+                return make_excel_safe(value)
+
+            return str(value)
+
+        # ----------------------------------------------------
+        # WRITE TABLES
+        # ----------------------------------------------------
+
         def write_table(ws, headers, rows):
             ws.append(headers)
+
             for cell in ws[1]:
                 cell.fill = header_fill
                 cell.font = header_font
                 cell.alignment = Alignment(horizontal="center")
+
             for row in rows:
-                ws.append(row)
+                # Apply conversion to EVERY cell in EVERY sheet.
+                ws.append([
+                    make_excel_safe(value)
+                    for value in row
+                ])
+
             ws.freeze_panes = "A2"
             ws.auto_filter.ref = ws.dimensions
+
             for column_cells in ws.columns:
                 max_length = 0
-                column_letter = get_column_letter(column_cells[0].column)
+                column_letter = get_column_letter(
+                    column_cells[0].column
+                )
+
                 for cell in column_cells[:5000]:
                     value = cell.value
-                    if value is not None:
-                        max_length = max(max_length, len(str(value)))
-                ws.column_dimensions[column_letter].width = min(max(max_length + 2, 12), 36)
 
-        def safe_datetime(value):
-            return value if isinstance(value, datetime) else (str(value) if value else None)
+                    if value is not None:
+                        max_length = max(
+                            max_length,
+                            len(str(value))
+                        )
+
+                ws.column_dimensions[column_letter].width = min(
+                    max(max_length + 2, 12),
+                    36
+                )
+
+        # ----------------------------------------------------
+        # BRANCH AND CASHIER HELPERS
+        # ----------------------------------------------------
 
         def branch_name(sale):
-            branch = branch_map.get(getattr(sale, "branch_id", None))
-            return getattr(branch, "name", None) or "Unknown branch"
+            branch = branch_map.get(
+                getattr(sale, "branch_id", None)
+            )
+
+            return (
+                getattr(branch, "name", None)
+                or "Unknown branch"
+            )
 
         def cashier_name(sale):
-            cashier = cashier_map.get(getattr(sale, "cashier_id", None))
+            cashier = cashier_map.get(
+                getattr(sale, "cashier_id", None)
+            )
+
             return (
                 getattr(cashier, "full_name", None)
                 or getattr(cashier, "username", None)
                 or "Unknown cashier"
             )
 
-        # Sales Records: include all sale states for auditability.
+        # ----------------------------------------------------
+        # SALES RECORDS
+        # ----------------------------------------------------
+
         sale_rows = []
+
         for sale in all_sales:
             sale_rows.append([
                 getattr(sale, "id", None),
                 getattr(sale, "sale_number", None),
-                safe_datetime(getattr(sale, "created_at", None)),
+                safe_datetime(
+                    getattr(sale, "created_at", None)
+                ),
                 getattr(sale, "branch_id", None),
                 branch_name(sale),
                 getattr(sale, "cashier_id", None),
@@ -3620,42 +3739,129 @@ def export_all_pos_reports_excel():
                 getattr(sale, "status", None),
                 "Yes" if sale.id in paid_sale_ids else "No",
             ])
-        write_table(sales_ws, [
-            "Sale ID", "Sale Number", "Date/Time", "Branch ID", "Branch",
-            "Cashier ID", "Cashier", "Customer", "Subtotal", "Discount",
-            "Sale Total", "Payment Method", "Payment Status", "Sale Status",
-            "Counts as Confirmed Paid Sale",
-        ], sale_rows)
 
-        # Sale Items: detailed quantities and historical costs, when known.
+        write_table(
+            sales_ws,
+            [
+                "Sale ID",
+                "Sale Number",
+                "Date/Time",
+                "Branch ID",
+                "Branch",
+                "Cashier ID",
+                "Cashier",
+                "Customer",
+                "Subtotal",
+                "Discount",
+                "Sale Total",
+                "Payment Method",
+                "Payment Status",
+                "Sale Status",
+                "Counts as Confirmed Paid Sale",
+            ],
+            sale_rows
+        )
+
+        # ----------------------------------------------------
+        # SALE ITEMS AND PRODUCT PERFORMANCE TOTALS
+        # ----------------------------------------------------
+
         item_rows = []
         product_totals = {}
         branch_totals = {}
-        sales_by_id = {sale.id: sale for sale in all_sales}
+
+        sales_by_id = {
+            sale.id: sale
+            for sale in all_sales
+        }
+
         for item in items:
-            sale = sales_by_id.get(getattr(item, "sale_id", None))
+            sale = sales_by_id.get(
+                getattr(item, "sale_id", None)
+            )
+
             financials = get_pos_item_financials(item)
-            product = product_map.get(getattr(item, "product_id", None))
-            product_name = getattr(product, "name", None) or "Deleted product"
-            stock_qty = financials["stock_quantity"] if financials else decimal_value(getattr(item, "quantity", 0), "0")
-            sale_qty = financials["sale_quantity"] if financials else decimal_value(getattr(item, "sale_quantity", getattr(item, "quantity", 0)), "0")
-            unit_price = financials["selling_price"] if financials else decimal_value(getattr(item, "price", 0), "0")
-            revenue = financials["revenue"] if financials else Decimal("0.00")
-            buying_price = financials["buying_price"] if financials else None
-            cost = financials["cost"] if financials else None
-            profit = financials["profit"] if financials else None
+
+            product = product_map.get(
+                getattr(item, "product_id", None)
+            )
+
+            product_name = (
+                getattr(product, "name", None)
+                or "Deleted product"
+            )
+
+            stock_qty = (
+                financials["stock_quantity"]
+                if financials
+                else decimal_value(
+                    getattr(item, "quantity", 0),
+                    "0"
+                )
+            )
+
+            sale_qty = (
+                financials["sale_quantity"]
+                if financials
+                else decimal_value(
+                    getattr(
+                        item,
+                        "sale_quantity",
+                        getattr(item, "quantity", 0)
+                    ),
+                    "0"
+                )
+            )
+
+            unit_price = (
+                financials["selling_price"]
+                if financials
+                else decimal_value(
+                    getattr(item, "price", 0),
+                    "0"
+                )
+            )
+
+            revenue = (
+                financials["revenue"]
+                if financials
+                else Decimal("0.00")
+            )
+
+            buying_price = (
+                financials["buying_price"]
+                if financials
+                else None
+            )
+
+            cost = (
+                financials["cost"]
+                if financials
+                else None
+            )
+
+            profit = (
+                financials["profit"]
+                if financials
+                else None
+            )
+
             item_rows.append([
                 getattr(item, "id", None),
                 getattr(item, "sale_id", None),
-                getattr(sale, "sale_number", None) if sale else None,
-                safe_datetime(getattr(sale, "created_at", None)) if sale else None,
+                getattr(sale, "sale_number", None)
+                if sale else None,
+                safe_datetime(
+                    getattr(sale, "created_at", None)
+                ) if sale else None,
                 branch_name(sale) if sale else "Unknown branch",
                 getattr(item, "product_id", None),
                 product_name,
                 float(stock_qty),
                 float(sale_qty),
                 float(unit_price),
-                float(buying_price) if buying_price is not None else None,
+                float(buying_price)
+                if buying_price is not None else None,
                 float(revenue),
                 float(cost) if cost is not None else None,
                 float(profit) if profit is not None else None,
@@ -3665,6 +3871,7 @@ def export_all_pos_reports_excel():
 
             if sale and sale.id in paid_sale_ids and financials:
                 key = getattr(item, "product_id", None)
+
                 if key not in product_totals:
                     product_totals[key] = {
                         "name": product_name,
@@ -3675,194 +3882,485 @@ def export_all_pos_reports_excel():
                         "profit": Decimal("0.00"),
                         "unknown_cost_revenue": Decimal("0.00"),
                     }
+
                 totals = product_totals[key]
+
                 totals["stock_qty"] += financials["stock_quantity"]
                 totals["sale_qty"] += financials["sale_quantity"]
                 totals["revenue"] += financials["revenue"]
+
                 if financials["cost"] is None:
-                    totals["unknown_cost_revenue"] += financials["revenue"]
+                    totals["unknown_cost_revenue"] += (
+                        financials["revenue"]
+                    )
                 else:
                     totals["cost"] += financials["cost"]
                     totals["profit"] += financials["profit"]
 
-        write_table(items_ws, [
-            "Item ID", "Sale ID", "Sale Number", "Sale Date/Time", "Branch",
-            "Product ID", "Product", "Stock Quantity (3 d.p.)",
-            "Selling Quantity (3 d.p.)", "Selling Unit Price", "Historical Buying Price",
-            "Line Revenue", "Cost of Goods Sold", "Gross Profit", "Cost Data", "Confirmed Paid Sale",
-        ], item_rows)
+        write_table(
+            items_ws,
+            [
+                "Item ID",
+                "Sale ID",
+                "Sale Number",
+                "Sale Date/Time",
+                "Branch",
+                "Product ID",
+                "Product",
+                "Stock Quantity (3 d.p.)",
+                "Selling Quantity (3 d.p.)",
+                "Selling Unit Price",
+                "Historical Buying Price",
+                "Line Revenue",
+                "Cost of Goods Sold",
+                "Gross Profit",
+                "Cost Data",
+                "Confirmed Paid Sale",
+            ],
+            item_rows
+        )
 
-        # Payment records, including pending and failed attempts.
+        # ----------------------------------------------------
+        # PAYMENT RECORDS
+        # ----------------------------------------------------
+
         payment_rows = []
+
         for payment in payments:
-            sale = sales_by_id.get(getattr(payment, "sale_id", None))
+            sale = sales_by_id.get(
+                getattr(payment, "sale_id", None)
+            )
+
             payment_rows.append([
                 getattr(payment, "id", None),
                 getattr(payment, "sale_id", None),
-                getattr(sale, "sale_number", None) if sale else None,
-                safe_datetime(getattr(payment, "created_at", getattr(payment, "paid_at", None))),
-                getattr(payment, "method", getattr(payment, "payment_method", None)),
+                getattr(sale, "sale_number", None)
+                if sale else None,
+                safe_datetime(
+                    getattr(
+                        payment,
+                        "created_at",
+                        getattr(payment, "paid_at", None)
+                    )
+                ),
+                getattr(
+                    payment,
+                    "method",
+                    getattr(payment, "payment_method", None)
+                ),
                 getattr(payment, "amount", None),
                 getattr(payment, "status", None),
-                getattr(payment, "transaction_reference", getattr(payment, "reference", None)),
+                getattr(
+                    payment,
+                    "transaction_reference",
+                    getattr(payment, "reference", None)
+                ),
                 getattr(payment, "notes", None),
             ])
-        write_table(payments_ws, [
-            "Payment ID", "Sale ID", "Sale Number", "Payment Date/Time",
-            "Payment Method", "Amount", "Payment Status", "Transaction Reference", "Notes",
-        ], payment_rows)
 
-        # Summary metrics use confirmed paid, active POS sales only.
-        total_revenue = sum((decimal_value(sale.total) for sale in paid_sales), Decimal("0.00"))
-        total_discounts = sum((decimal_value(getattr(sale, "discount", 0)) for sale in paid_sales), Decimal("0.00"))
+        write_table(
+            payments_ws,
+            [
+                "Payment ID",
+                "Sale ID",
+                "Sale Number",
+                "Payment Date/Time",
+                "Payment Method",
+                "Amount",
+                "Payment Status",
+                "Transaction Reference",
+                "Notes",
+            ],
+            payment_rows
+        )
+
+        # ----------------------------------------------------
+        # SUMMARY METRICS
+        # ----------------------------------------------------
+
+        total_revenue = sum(
+            (
+                decimal_value(sale.total)
+                for sale in paid_sales
+            ),
+            Decimal("0.00")
+        )
+
+        total_discounts = sum(
+            (
+                decimal_value(
+                    getattr(sale, "discount", 0)
+                )
+                for sale in paid_sales
+            ),
+            Decimal("0.00")
+        )
+
         item_cost = Decimal("0.00")
         known_profit = Decimal("0.00")
         unknown_cost_revenue = Decimal("0.00")
+
         for item in items:
-            sale = sales_by_id.get(getattr(item, "sale_id", None))
+            sale = sales_by_id.get(
+                getattr(item, "sale_id", None)
+            )
+
             if not sale or sale.id not in paid_sale_ids:
                 continue
+
             financials = get_pos_item_financials(item)
+
             if not financials:
                 continue
+
             if financials["cost"] is None:
                 unknown_cost_revenue += financials["revenue"]
             else:
                 item_cost += financials["cost"]
                 known_profit += financials["profit"]
 
+        filtered_branch = branch_map.get(branch_id)
+
+        if branch_id is not None:
+            branch_filter_label = (
+                getattr(filtered_branch, "name", None)
+                or f"Branch ID {branch_id}"
+            )
+        else:
+            branch_filter_label = "All branches"
+
         summary_rows = [
             ["Report", "All POS Reports Export"],
-            ["Generated At", datetime.now().replace(microsecond=0)],
-            ["Start Date", start_date.date() if start_date else "All available dates"],
-            ["End Date", (end_date - timedelta(days=1)).date() if end_date else "All available dates"],
-            ["Branch Filter", branch_map.get(branch_id).name if branch_id in branch_map else (branch_id if branch_id else "All branches")],
+            [
+                "Generated At",
+                datetime.now().replace(microsecond=0)
+            ],
+            [
+                "Start Date",
+                start_date.date()
+                if start_date else "All available dates"
+            ],
+            [
+                "End Date",
+                (end_date - timedelta(days=1)).date()
+                if end_date else "All available dates"
+            ],
+            ["Branch Filter", branch_filter_label],
             ["POS Sales Records", len(all_sales)],
             ["Confirmed Paid Sales", len(paid_sales)],
             ["Voided/Cancelled Sales", len(void_sales)],
             ["Confirmed Sales Revenue", float(total_revenue)],
             ["Discounts on Confirmed Sales", float(total_discounts)],
-            ["Known Historical Cost of Goods Sold", float(item_cost)],
-            ["Gross Profit on Items with Known Costs", float(known_profit)],
-            ["Sales Value with Unknown Historical Costs", float(unknown_cost_revenue)],
-            ["Average Confirmed Sale Value", float(total_revenue / len(paid_sales)) if paid_sales else 0],
-            ["Profit Note", "Gross profit is partial when historical buying prices are missing; it is not net profit."],
-            ["Scope Note", "Cashier POS sales only. Website customer orders are excluded."],
+            [
+                "Known Historical Cost of Goods Sold",
+                float(item_cost)
+            ],
+            [
+                "Gross Profit on Items with Known Costs",
+                float(known_profit)
+            ],
+            [
+                "Sales Value with Unknown Historical Costs",
+                float(unknown_cost_revenue)
+            ],
+            [
+                "Average Confirmed Sale Value",
+                float(total_revenue / len(paid_sales))
+                if paid_sales else 0
+            ],
+            [
+                "Profit Note",
+                "Gross profit is partial when historical buying "
+                "prices are missing; it is not net profit."
+            ],
+            [
+                "Scope Note",
+                "Cashier POS sales only. Website customer orders "
+                "are excluded."
+            ],
         ]
-        write_table(summary_ws, ["Metric", "Value"], summary_rows)
+
+        write_table(
+            summary_ws,
+            ["Metric", "Value"],
+            summary_rows
+        )
+
         for cell in summary_ws[1]:
             cell.fill = title_fill
             cell.font = title_font
 
-        # Branch performance uses confirmed paid sales only.
+        # ----------------------------------------------------
+        # BRANCH PERFORMANCE
+        # ----------------------------------------------------
+
         for sale in paid_sales:
             key = getattr(sale, "branch_id", None)
+
             if key not in branch_totals:
                 branch_totals[key] = {
-                    "name": branch_name(sale), "count": 0,
-                    "revenue": Decimal("0.00"), "cost": Decimal("0.00"),
-                    "profit": Decimal("0.00"), "unknown_cost_revenue": Decimal("0.00"),
+                    "name": branch_name(sale),
+                    "count": 0,
+                    "revenue": Decimal("0.00"),
+                    "cost": Decimal("0.00"),
+                    "profit": Decimal("0.00"),
+                    "unknown_cost_revenue": Decimal("0.00"),
                 }
+
             branch_totals[key]["count"] += 1
-            branch_totals[key]["revenue"] += decimal_value(sale.total)
+            branch_totals[key]["revenue"] += decimal_value(
+                sale.total
+            )
+
         for item in items:
-            sale = sales_by_id.get(getattr(item, "sale_id", None))
+            sale = sales_by_id.get(
+                getattr(item, "sale_id", None)
+            )
+
             if not sale or sale.id not in paid_sale_ids:
                 continue
+
             financials = get_pos_item_financials(item)
+
             if not financials:
                 continue
+
             key = getattr(sale, "branch_id", None)
+
             if key not in branch_totals:
                 branch_totals[key] = {
-                    "name": branch_name(sale), "count": 0,
-                    "revenue": Decimal("0.00"), "cost": Decimal("0.00"),
-                    "profit": Decimal("0.00"), "unknown_cost_revenue": Decimal("0.00"),
+                    "name": branch_name(sale),
+                    "count": 0,
+                    "revenue": Decimal("0.00"),
+                    "cost": Decimal("0.00"),
+                    "profit": Decimal("0.00"),
+                    "unknown_cost_revenue": Decimal("0.00"),
                 }
+
             if financials["cost"] is None:
-                branch_totals[key]["unknown_cost_revenue"] += financials["revenue"]
+                branch_totals[key]["unknown_cost_revenue"] += (
+                    financials["revenue"]
+                )
             else:
                 branch_totals[key]["cost"] += financials["cost"]
                 branch_totals[key]["profit"] += financials["profit"]
-        branch_rows = [[
-            key, data["name"], data["count"], float(data["revenue"]),
-            float(data["cost"]), float(data["profit"]),
-            float(data["unknown_cost_revenue"]),
-            "Complete" if data["unknown_cost_revenue"] == 0 else "Incomplete: missing historical costs",
-        ] for key, data in sorted(branch_totals.items(), key=lambda pair: pair[1]["revenue"], reverse=True)]
-        write_table(branch_ws, [
-            "Branch ID", "Branch", "Confirmed Paid Sales", "Revenue",
-            "Known Cost of Goods Sold", "Gross Profit on Known Costs",
-            "Sales Value with Unknown Costs", "Cost Data Status",
-        ], branch_rows)
+
+        branch_rows = [
+            [
+                key,
+                data["name"],
+                data["count"],
+                float(data["revenue"]),
+                float(data["cost"]),
+                float(data["profit"]),
+                float(data["unknown_cost_revenue"]),
+                (
+                    "Complete"
+                    if data["unknown_cost_revenue"] == 0
+                    else "Incomplete: missing historical costs"
+                ),
+            ]
+            for key, data in sorted(
+                branch_totals.items(),
+                key=lambda pair: pair[1]["revenue"],
+                reverse=True
+            )
+        ]
+
+        write_table(
+            branch_ws,
+            [
+                "Branch ID",
+                "Branch",
+                "Confirmed Paid Sales",
+                "Revenue",
+                "Known Cost of Goods Sold",
+                "Gross Profit on Known Costs",
+                "Sales Value with Unknown Costs",
+                "Cost Data Status",
+            ],
+            branch_rows
+        )
+
+        # ----------------------------------------------------
+        # PRODUCT PERFORMANCE
+        # ----------------------------------------------------
 
         product_rows = []
-        for product_id, data in sorted(product_totals.items(), key=lambda pair: pair[1]["revenue"], reverse=True):
+
+        for product_id, data in sorted(
+            product_totals.items(),
+            key=lambda pair: pair[1]["revenue"],
+            reverse=True
+        ):
             product_rows.append([
-                product_id, data["name"], float(data["stock_qty"]),
-                float(data["sale_qty"]), float(data["revenue"]),
-                float(data["cost"]), float(data["profit"]),
+                product_id,
+                data["name"],
+                float(data["stock_qty"]),
+                float(data["sale_qty"]),
+                float(data["revenue"]),
+                float(data["cost"]),
+                float(data["profit"]),
                 float(data["unknown_cost_revenue"]),
-                "Complete" if data["unknown_cost_revenue"] == 0 else "Incomplete: missing historical costs",
+                (
+                    "Complete"
+                    if data["unknown_cost_revenue"] == 0
+                    else "Incomplete: missing historical costs"
+                ),
             ])
-        write_table(product_ws, [
-            "Product ID", "Product", "Stock Quantity Sold (3 d.p.)",
-            "Selling Quantity Sold (3 d.p.)", "Revenue", "Known Cost of Goods Sold",
-            "Gross Profit on Known Costs", "Sales Value with Unknown Costs", "Cost Data Status",
-        ], product_rows)
+
+        write_table(
+            product_ws,
+            [
+                "Product ID",
+                "Product",
+                "Stock Quantity Sold (3 d.p.)",
+                "Selling Quantity Sold (3 d.p.)",
+                "Revenue",
+                "Known Cost of Goods Sold",
+                "Gross Profit on Known Costs",
+                "Sales Value with Unknown Costs",
+                "Cost Data Status",
+            ],
+            product_rows
+        )
+
+        # ----------------------------------------------------
+        # VOIDED SALES
+        # ----------------------------------------------------
 
         void_rows = []
+
         for sale in void_sales:
             void_rows.append([
-                getattr(sale, "id", None), getattr(sale, "sale_number", None),
-                safe_datetime(getattr(sale, "created_at", None)),
-                getattr(sale, "branch_id", None), branch_name(sale),
-                getattr(sale, "cashier_id", None), cashier_name(sale),
-                getattr(sale, "total", None), getattr(sale, "payment_status", None),
+                getattr(sale, "id", None),
+                getattr(sale, "sale_number", None),
+                safe_datetime(
+                    getattr(sale, "created_at", None)
+                ),
+                getattr(sale, "branch_id", None),
+                branch_name(sale),
+                getattr(sale, "cashier_id", None),
+                cashier_name(sale),
+                getattr(sale, "total", None),
+                getattr(sale, "payment_status", None),
                 getattr(sale, "status", None),
             ])
-        write_table(void_ws, [
-            "Sale ID", "Sale Number", "Date/Time", "Branch ID", "Branch",
-            "Cashier ID", "Cashier", "Recorded Total", "Payment Status", "Sale Status",
-        ], void_rows)
 
-        # Consistent display formats for date, money and fractional quantities.
+        write_table(
+            void_ws,
+            [
+                "Sale ID",
+                "Sale Number",
+                "Date/Time",
+                "Branch ID",
+                "Branch",
+                "Cashier ID",
+                "Cashier",
+                "Recorded Total",
+                "Payment Status",
+                "Sale Status",
+            ],
+            void_rows
+        )
+
+        # ----------------------------------------------------
+        # FORMATTING
+        # ----------------------------------------------------
+
         money_headers = {
-            "Subtotal", "Discount", "Sale Total", "Amount", "Selling Unit Price",
-            "Historical Buying Price", "Line Revenue", "Cost of Goods Sold", "Gross Profit",
-            "Revenue", "Known Cost of Goods Sold", "Gross Profit on Known Costs",
-            "Sales Value with Unknown Costs", "Confirmed Sales Revenue",
-            "Discounts on Confirmed Sales", "Known Historical Cost of Goods Sold",
-            "Gross Profit on Items with Known Costs", "Average Confirmed Sale Value",
+            "Subtotal",
+            "Discount",
+            "Sale Total",
+            "Amount",
+            "Selling Unit Price",
+            "Historical Buying Price",
+            "Line Revenue",
+            "Cost of Goods Sold",
+            "Gross Profit",
+            "Revenue",
+            "Known Cost of Goods Sold",
+            "Gross Profit on Known Costs",
+            "Sales Value with Unknown Costs",
+            "Confirmed Sales Revenue",
+            "Discounts on Confirmed Sales",
+            "Known Historical Cost of Goods Sold",
+            "Gross Profit on Items with Known Costs",
+            "Average Confirmed Sale Value",
+            "Confirmed Sales Revenue",
+            "Recorded Total",
         }
+
         for ws in workbook.worksheets:
             for row in ws.iter_rows(min_row=2):
                 for cell in row:
-                    header = ws.cell(row=1, column=cell.column).value
-                    if header in money_headers and isinstance(cell.value, (int, float, Decimal)):
-                        cell.number_format = '#,##0.00;[Red]-#,##0.00'
-                    if header and "Quantity" in str(header) and isinstance(cell.value, (int, float, Decimal)):
-                        cell.number_format = '0.000'
-                    if header and ("Date" in str(header) or header == "Generated At") and isinstance(cell.value, datetime):
-                        cell.number_format = 'yyyy-mm-dd hh:mm:ss'
+                    header = ws.cell(
+                        row=1,
+                        column=cell.column
+                    ).value
+
+                    if (
+                        header in money_headers
+                        and isinstance(cell.value, (int, float, Decimal))
+                    ):
+                        cell.number_format = (
+                            '#,##0.00;[Red]-#,##0.00'
+                        )
+
+                    if (
+                        header
+                        and "Quantity" in str(header)
+                        and isinstance(cell.value, (int, float, Decimal))
+                    ):
+                        cell.number_format = "0.000"
+
+                    if (
+                        header
+                        and (
+                            "Date" in str(header)
+                            or header == "Generated At"
+                        )
+                        and isinstance(cell.value, datetime)
+                    ):
+                        cell.number_format = "yyyy-mm-dd hh:mm:ss"
+
             for cell in ws[1]:
-                cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+                cell.alignment = Alignment(
+                    horizontal="center",
+                    vertical="center",
+                    wrap_text=True
+                )
+
             ws.row_dimensions[1].height = 30
+
+        # ----------------------------------------------------
+        # SAVE WORKBOOK
+        # ----------------------------------------------------
 
         output = BytesIO()
         workbook.save(output)
         output.seek(0)
 
         filename_parts = ["headmaster_pos_reports"]
+
         if start_date:
-            filename_parts.append(start_date.strftime("%Y%m%d"))
+            filename_parts.append(
+                start_date.strftime("%Y%m%d")
+            )
+
         if end_date:
-            filename_parts.append((end_date - timedelta(days=1)).strftime("%Y%m%d"))
+            filename_parts.append(
+                (end_date - timedelta(days=1)).strftime("%Y%m%d")
+            )
+
         filename = "_".join(filename_parts) + ".xlsx"
 
         return send_file(
             output,
-            mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            mimetype=(
+                "application/vnd.openxmlformats-officedocument."
+                "spreadsheetml.sheet"
+            ),
             as_attachment=True,
             download_name=filename,
         )
@@ -3875,9 +4373,12 @@ def export_all_pos_reports_excel():
 
     except Exception:
         db.session.rollback()
-        logger.exception("Failed to export POS reports to Excel.")
+
+        logger.exception(
+            "Failed to export POS reports to Excel."
+        )
+
         return jsonify({
             "status": "error",
             "message": "Unable to export POS reports to Excel.",
         }), 500
-
