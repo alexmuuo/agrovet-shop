@@ -395,44 +395,83 @@ fetchSales(1);
 }, [fetchSales]);
 
 useEffect(() => {
-let cancelled = false;
+  let cancelled = false;
 
-
-async function loadFilters() {
-  try {
-    const [branchesResponse, cashiersResponse] = await Promise.all([
-      api.get("/admin/branches"),
-      api.get("/admin/cashiers"),
-    ]);
-
-    if (cancelled) return;
-
-    const branchData = branchesResponse?.data ?? {};
-    const cashierData = cashiersResponse?.data ?? {};
-
-    const branchList = Array.isArray(branchData)
-      ? branchData
-      : branchData.branches ?? branchData.data ?? [];
-
-    const cashierList = Array.isArray(cashierData)
-      ? cashierData
-      : cashierData.cashiers ?? cashierData.data ?? [];
-
-    setBranches(Array.isArray(branchList) ? branchList : []);
-    setCashiers(Array.isArray(cashierList) ? cashierList : []);
-  } catch {
-    // Filters remain usable without optional dropdown data.
+  // Load these independently: one endpoint failing must not prevent the
+  // other dropdown from loading. The dropdowns also fall back to sales data.
+  async function loadBranches() {
+    try {
+      const response = await api.get("/admin/branches");
+      if (cancelled) return;
+      const data = response?.data ?? {};
+      const list = Array.isArray(data)
+        ? data
+        : data.branches ?? data.data ?? data.items ?? data.results ?? [];
+      setBranches(Array.isArray(list) ? list : []);
+    } catch {
+      if (!cancelled) setBranches([]);
+    }
   }
-}
 
-loadFilters();
+  async function loadCashiers() {
+    try {
+      const response = await api.get("/admin/cashiers");
+      if (cancelled) return;
+      const data = response?.data ?? {};
+      const list = Array.isArray(data)
+        ? data
+        : data.cashiers ?? data.data ?? data.items ?? data.results ?? [];
+      setCashiers(Array.isArray(list) ? list : []);
+    } catch {
+      if (!cancelled) setCashiers([]);
+    }
+  }
 
-return () => {
-  cancelled = true;
-};
+  loadBranches();
+  loadCashiers();
 
-
+  return () => {
+    cancelled = true;
+  };
 }, []);
+
+const branchOptions = useMemo(() => {
+  const options = new Map();
+  branches.forEach((branch) => {
+    const id = branch?.id ?? branch?.branch_id;
+    const name = branch?.name ?? branch?.branch_name ?? branch?.title;
+    if (id !== undefined && id !== null && name) {
+      options.set(String(id), { id: String(id), name: String(name) });
+    }
+  });
+  allSales.forEach((sale) => {
+    const id = sale?.branch_id;
+    const name = sale?.branch_name;
+    if (id !== undefined && id !== null && name && !options.has(String(id))) {
+      options.set(String(id), { id: String(id), name: String(name) });
+    }
+  });
+  return [...options.values()].sort((a, b) => a.name.localeCompare(b.name));
+}, [branches, allSales]);
+
+const cashierOptions = useMemo(() => {
+  const options = new Map();
+  cashiers.forEach((cashier) => {
+    const id = cashier?.id ?? cashier?.cashier_id;
+    const name = cashier?.full_name ?? cashier?.name ?? cashier?.username ?? cashier?.cashier_name;
+    if (id !== undefined && id !== null && name) {
+      options.set(String(id), { id: String(id), name: String(name) });
+    }
+  });
+  allSales.forEach((sale) => {
+    const id = sale?.cashier_id;
+    const name = sale?.cashier_name ?? sale?.username;
+    if (id !== undefined && id !== null && name && !options.has(String(id))) {
+      options.set(String(id), { id: String(id), name: String(name) });
+    }
+  });
+  return [...options.values()].sort((a, b) => a.name.localeCompare(b.name));
+}, [cashiers, allSales]);
 
 const filteredSales = useMemo(() => {
   const search = String(filters.search ?? "").trim().toLowerCase();
@@ -888,7 +927,7 @@ a clear audit trail. </p> </div>
             onChange={(event) => setBranchFilter(event.target.value)}
           >
             <option value="">All branches</option>
-            {branches.map((branch) => (
+            {branchOptions.map((branch) => (
               <option key={branch.id} value={branch.id}>
                 {branch.name}
               </option>
@@ -904,9 +943,9 @@ a clear audit trail. </p> </div>
             onChange={(event) => setCashierFilter(event.target.value)}
           >
             <option value="">All cashiers</option>
-            {cashiers.map((cashier) => (
+            {cashierOptions.map((cashier) => (
               <option key={cashier.id} value={cashier.id}>
-                {cashier.full_name || cashier.username}
+                {cashier.name}
               </option>
             ))}
           </select>
