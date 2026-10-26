@@ -305,13 +305,9 @@ fallback
 }
 
 export default function POSSales() {
-const [sales, setSales] = useState([]);
-const [pagination, setPagination] = useState({
-page: 1,
-per_page: 50,
-total: 0,
-pages: 0,
-});
+const [allSales, setAllSales] = useState([]);
+const [pageState, setPageState] = useState(1);
+const PAGE_SIZE = 50;
 
 const [searchInput, setSearchInput] = useState("");
 const [filters, setFilters] = useState({
@@ -347,48 +343,26 @@ const [branchFilter, setBranchFilter] = useState("");
 const [cashierFilter, setCashierFilter] = useState("");
 
 const fetchSales = useCallback(
-async (page = 1, overrideFilters = filters) => {
-setLoading(true);
-setError("");
-
+async (page = 1) => {
+  setLoading(true);
+  setError("");
 
   try {
-    const params = {
-      page,
-      per_page: 50,
-    };
-
-    Object.entries(overrideFilters).forEach(([key, value]) => {
-      if (value !== "" && value !== null && value !== undefined) {
-        params[key] = value;
-      }
-    });
-
-    const response = await api.get("/admin/pos-sales", {
-      params,
-    });
-
+    // The current backend returns all POS sales and does not implement
+    // search/status/cashier filters or pagination. Fetch once, then filter
+    // and paginate the complete result in this component.
+    const response = await api.get("/admin/pos-sales");
     const data = response?.data ?? {};
 
-    setSales(Array.isArray(data.sales) ? data.sales : []);
-
-    setPagination({
-      page: Number(data.pagination?.page ?? page),
-      per_page: Number(data.pagination?.per_page ?? 50),
-      total: Number(data.pagination?.total ?? 0),
-      pages: Number(data.pagination?.pages ?? 0),
-    });
+    setAllSales(Array.isArray(data.sales) ? data.sales : []);
+    setPageState(Math.max(1, Number(page) || 1));
   } catch (requestError) {
-    setError(
-      extractError(requestError, "Failed to load POS sales.")
-    );
+    setError(extractError(requestError, "Failed to load POS sales."));
   } finally {
     setLoading(false);
   }
 },
-[filters]
-
-
+[]
 );
 
 const fetchSaleDetails = useCallback(async (saleId) => {
@@ -460,6 +434,58 @@ return () => {
 
 }, []);
 
+const filteredSales = useMemo(() => {
+  const search = String(filters.search ?? "").trim().toLowerCase();
+  const status = String(filters.status ?? "").trim().toLowerCase();
+  const branchId = String(filters.branch_id ?? "");
+  const cashierId = String(filters.cashier_id ?? "");
+  const startDate = filters.start_date || "";
+  const endDate = filters.end_date || "";
+
+  return allSales.filter((sale) => {
+    if (status && normaliseStatus(sale.status) !== status) return false;
+    if (branchId && String(sale.branch_id ?? "") !== branchId) return false;
+    if (cashierId && String(sale.cashier_id ?? "") !== cashierId) return false;
+
+    const saleDate = sale.created_at ? String(sale.created_at).slice(0, 10) : "";
+    if (startDate && (!saleDate || saleDate < startDate)) return false;
+    if (endDate && (!saleDate || saleDate > endDate)) return false;
+
+    if (search) {
+      const searchable = [
+        sale.sale_number,
+        sale.id,
+        sale.branch_name,
+        sale.cashier_name,
+        sale.payment_method,
+        sale.payment_status,
+        sale.status,
+      ].filter((value) => value !== null && value !== undefined)
+        .join(" ")
+        .toLowerCase();
+      if (!searchable.includes(search)) return false;
+    }
+
+    return true;
+  });
+}, [allSales, filters]);
+
+const pagination = useMemo(() => {
+  const pages = Math.ceil(filteredSales.length / PAGE_SIZE);
+  const page = Math.min(pageState, Math.max(pages, 1));
+  return {
+    page,
+    per_page: PAGE_SIZE,
+    total: filteredSales.length,
+    pages,
+  };
+}, [filteredSales.length, pageState]);
+
+const sales = useMemo(() => {
+  const start = (pagination.page - 1) * PAGE_SIZE;
+  return filteredSales.slice(start, start + PAGE_SIZE);
+}, [filteredSales, pagination.page]);
+
 const visibleTotal = useMemo(
 () =>
 sales.reduce(
@@ -483,7 +509,7 @@ const nextFilters = {
 };
 
 setFilters(nextFilters);
-fetchSales(1, nextFilters);
+fetchSales(1);
 
 
 }
@@ -504,7 +530,7 @@ setBranchFilter("");
 setCashierFilter("");
 setFilters(emptyFilters);
 setNotice("");
-fetchSales(1, emptyFilters);
+fetchSales(1);
 
 
 }
