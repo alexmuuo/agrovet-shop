@@ -4265,6 +4265,226 @@ def export_all_pos_reports_excel():
         )
 
         # ----------------------------------------------------
+        # BRANCH-SPECIFIC WORKSHEETS — BRANCH 1 AND BRANCH 2
+        # ----------------------------------------------------
+        # Keep the existing consolidated worksheets above, and add
+        # separate worksheets for each branch so their transactions
+        # and figures can be reviewed without mixing the data.
+
+        # Load branch records even when a branch has no sales in the
+        # selected date range, so the workbook still labels it correctly.
+        branch_records = {
+            branch.id: branch
+            for branch in Branch.query.filter(Branch.id.in_([1, 2])).all()
+        }
+        branch_records.update(branch_map)
+
+        for branch_number in (1, 2):
+            branch_sales = [
+                sale for sale in all_sales
+                if getattr(sale, "branch_id", None) == branch_number
+            ]
+            branch_sale_ids = {sale.id for sale in branch_sales}
+            branch_paid_sales = [
+                sale for sale in branch_sales
+                if sale.id in paid_sale_ids
+            ]
+            branch_paid_ids = {sale.id for sale in branch_paid_sales}
+            branch_void_sales = [
+                sale for sale in branch_sales
+                if normalize_status(getattr(sale, "status", None))
+                in POS_INACTIVE_SALE_STATUSES
+            ]
+            branch_items = [
+                item for item in items
+                if getattr(item, "sale_id", None) in branch_sale_ids
+            ]
+            branch_payments = [
+                payment for payment in payments
+                if getattr(payment, "sale_id", None) in branch_sale_ids
+            ]
+
+            branch_record = branch_records.get(branch_number)
+            branch_label = (
+                getattr(branch_record, "name", None)
+                or f"Branch {branch_number}"
+            )
+            sheet_prefix = f"Branch {branch_number}"
+
+            # Separate branch summary.
+            branch_revenue = sum(
+                (decimal_value(sale.total) for sale in branch_paid_sales),
+                Decimal("0.00")
+            )
+            branch_discounts = sum(
+                (
+                    decimal_value(getattr(sale, "discount", 0))
+                    for sale in branch_paid_sales
+                ),
+                Decimal("0.00")
+            )
+            branch_cost = Decimal("0.00")
+            branch_profit = Decimal("0.00")
+            branch_unknown_cost_revenue = Decimal("0.00")
+
+            for item in branch_items:
+                sale = next(
+                    (sale for sale in branch_sales
+                     if sale.id == getattr(item, "sale_id", None)),
+                    None
+                )
+                if not sale or sale.id not in branch_paid_ids:
+                    continue
+                financials = get_pos_item_financials(item)
+                if not financials:
+                    continue
+                if financials["cost"] is None:
+                    branch_unknown_cost_revenue += financials["revenue"]
+                else:
+                    branch_cost += financials["cost"]
+                    branch_profit += financials["profit"]
+
+            branch_summary_ws = workbook.create_sheet(
+                f"{sheet_prefix} Summary"
+            )
+            branch_summary_rows = [
+                ["Report", f"{branch_label} POS Summary"],
+                ["Generated At", datetime.now().replace(microsecond=0)],
+                ["Branch ID", branch_number],
+                ["Branch", branch_label],
+                ["Start Date", start_date.date() if start_date else "All available dates"],
+                ["End Date", (end_date - timedelta(days=1)).date() if end_date else "All available dates"],
+                ["POS Sales Records", len(branch_sales)],
+                ["Confirmed Paid Sales", len(branch_paid_sales)],
+                ["Voided/Cancelled Sales", len(branch_void_sales)],
+                ["Confirmed Sales Revenue", float(branch_revenue)],
+                ["Discounts on Confirmed Sales", float(branch_discounts)],
+                ["Known Historical Cost of Goods Sold", float(branch_cost)],
+                ["Gross Profit on Items with Known Costs", float(branch_profit)],
+                ["Sales Value with Unknown Historical Costs", float(branch_unknown_cost_revenue)],
+                ["Average Confirmed Sale Value", float(branch_revenue / len(branch_paid_sales)) if branch_paid_sales else 0],
+                ["Profit Note", "Gross profit is partial where historical buying prices are missing; it is not net profit."],
+                ["Scope Note", "Cashier POS sales only. Website customer orders are excluded."],
+            ]
+            write_table(branch_summary_ws, ["Metric", "Value"], branch_summary_rows)
+            for cell in branch_summary_ws[1]:
+                cell.fill = title_fill
+                cell.font = title_font
+
+            # Branch-only sales records.
+            branch_sales_ws = workbook.create_sheet(f"{sheet_prefix} Sales")
+            branch_sales_rows = [[
+                getattr(sale, "id", None),
+                getattr(sale, "sale_number", None),
+                safe_datetime(getattr(sale, "created_at", None)),
+                getattr(sale, "branch_id", None),
+                branch_label,
+                getattr(sale, "cashier_id", None),
+                cashier_name(sale),
+                getattr(sale, "customer_name", None),
+                getattr(sale, "subtotal", None),
+                getattr(sale, "discount", None),
+                getattr(sale, "total", None),
+                getattr(sale, "payment_method", None),
+                getattr(sale, "payment_status", None),
+                getattr(sale, "status", None),
+                "Yes" if sale.id in paid_sale_ids else "No",
+            ] for sale in branch_sales]
+            write_table(branch_sales_ws, [
+                "Sale ID", "Sale Number", "Date/Time", "Branch ID", "Branch",
+                "Cashier ID", "Cashier", "Customer", "Subtotal", "Discount",
+                "Sale Total", "Payment Method", "Payment Status", "Sale Status",
+                "Counts as Confirmed Paid Sale",
+            ], branch_sales_rows)
+
+            # Branch-only sale items.
+            branch_items_ws = workbook.create_sheet(f"{sheet_prefix} Items")
+            branch_item_rows = []
+            for item in branch_items:
+                sale = next(
+                    (sale for sale in branch_sales
+                     if sale.id == getattr(item, "sale_id", None)),
+                    None
+                )
+                financials = get_pos_item_financials(item)
+                product = product_map.get(getattr(item, "product_id", None))
+                product_name = getattr(product, "name", None) or "Deleted product"
+                stock_qty = financials["stock_quantity"] if financials else decimal_value(getattr(item, "quantity", 0), "0")
+                sale_qty = financials["sale_quantity"] if financials else decimal_value(getattr(item, "sale_quantity", getattr(item, "quantity", 0)), "0")
+                unit_price = financials["selling_price"] if financials else decimal_value(getattr(item, "price", 0), "0")
+                revenue = financials["revenue"] if financials else Decimal("0.00")
+                buying_price = financials["buying_price"] if financials else None
+                cost = financials["cost"] if financials else None
+                profit = financials["profit"] if financials else None
+                branch_item_rows.append([
+                    getattr(item, "id", None),
+                    getattr(item, "sale_id", None),
+                    getattr(sale, "sale_number", None) if sale else None,
+                    safe_datetime(getattr(sale, "created_at", None)) if sale else None,
+                    branch_label,
+                    getattr(item, "product_id", None),
+                    product_name,
+                    float(stock_qty),
+                    float(sale_qty),
+                    float(unit_price),
+                    float(buying_price) if buying_price is not None else None,
+                    float(revenue),
+                    float(cost) if cost is not None else None,
+                    float(profit) if profit is not None else None,
+                    "Known" if buying_price is not None else "Unknown",
+                    "Yes" if sale and sale.id in paid_sale_ids else "No",
+                ])
+            write_table(branch_items_ws, [
+                "Item ID", "Sale ID", "Sale Number", "Sale Date/Time", "Branch",
+                "Product ID", "Product", "Stock Quantity (3 d.p.)",
+                "Selling Quantity (3 d.p.)", "Selling Unit Price",
+                "Historical Buying Price", "Line Revenue", "Cost of Goods Sold",
+                "Gross Profit", "Cost Data", "Confirmed Paid Sale",
+            ], branch_item_rows)
+
+            # Branch-only payment records.
+            branch_payments_ws = workbook.create_sheet(f"{sheet_prefix} Payments")
+            branch_payment_rows = []
+            branch_sales_lookup = {sale.id: sale for sale in branch_sales}
+            for payment in branch_payments:
+                sale = branch_sales_lookup.get(getattr(payment, "sale_id", None))
+                branch_payment_rows.append([
+                    getattr(payment, "id", None),
+                    getattr(payment, "sale_id", None),
+                    getattr(sale, "sale_number", None) if sale else None,
+                    safe_datetime(getattr(payment, "created_at", getattr(payment, "paid_at", None))),
+                    getattr(payment, "method", getattr(payment, "payment_method", None)),
+                    getattr(payment, "amount", None),
+                    getattr(payment, "status", None),
+                    getattr(payment, "transaction_reference", getattr(payment, "reference", None)),
+                    getattr(payment, "notes", None),
+                ])
+            write_table(branch_payments_ws, [
+                "Payment ID", "Sale ID", "Sale Number", "Payment Date/Time",
+                "Payment Method", "Amount", "Payment Status",
+                "Transaction Reference", "Notes",
+            ], branch_payment_rows)
+
+            # Branch-only voided/cancelled sales.
+            branch_void_ws = workbook.create_sheet(f"{sheet_prefix} Voided")
+            branch_void_rows = [[
+                getattr(sale, "id", None),
+                getattr(sale, "sale_number", None),
+                safe_datetime(getattr(sale, "created_at", None)),
+                getattr(sale, "branch_id", None),
+                branch_label,
+                getattr(sale, "cashier_id", None),
+                cashier_name(sale),
+                getattr(sale, "total", None),
+                getattr(sale, "payment_status", None),
+                getattr(sale, "status", None),
+            ] for sale in branch_void_sales]
+            write_table(branch_void_ws, [
+                "Sale ID", "Sale Number", "Date/Time", "Branch ID", "Branch",
+                "Cashier ID", "Cashier", "Recorded Total", "Payment Status", "Sale Status",
+            ], branch_void_rows)
+
+        # ----------------------------------------------------
         # FORMATTING
         # ----------------------------------------------------
 
