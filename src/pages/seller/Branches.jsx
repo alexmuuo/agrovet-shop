@@ -103,12 +103,25 @@ const formatMoney = (value) =>
   }).format(Number(value) || 0);
 
 function getErrorMessage(error) {
-  return (
-    error?.response?.data?.message ||
-    error?.response?.data?.error ||
-    error?.message ||
-    "Something went wrong. Please try again."
-  );
+  const serverMessage =
+    error?.response?.data?.message || error?.response?.data?.error;
+
+  if (serverMessage) return serverMessage;
+
+  if (error?.response) {
+    return `Server returned HTTP ${error.response.status}${
+      error.response.statusText ? ` (${error.response.statusText})` : ""
+    }.`;
+  }
+
+  if (error?.request) {
+    const method = String(error.config?.method || "request").toUpperCase();
+    const baseURL = error.config?.baseURL || "";
+    const requestURL = error.config?.url || "unknown endpoint";
+    return `No response received for ${method} ${baseURL}${requestURL}. Check the API URL, Vercel routing, and browser network/CORS errors.`;
+  }
+
+  return error?.message || "Something went wrong. Please try again.";
 }
 
 function Branches() {
@@ -251,14 +264,59 @@ function Branches() {
     setSuccess("");
 
     try {
-      await api.put(
-        `/admin/branches/${selectedBranchId}/stock/${productId}`,
-        { quantity: Number(quantityText) }
-      );
+      if (!selectedBranchId || !productId) {
+        throw new Error("A branch and product must be selected before saving stock.");
+      }
 
+      const quantity = Number(quantityText);
+      if (!Number.isFinite(quantity) || quantity < 0) {
+        throw new Error("Enter a valid stock quantity of zero or more.");
+      }
+
+      const endpoint = `/admin/branches/${selectedBranchId}/stock/${productId}`;
+      console.info("Updating branch stock", {
+        method: "PUT",
+        endpoint,
+        branchId: selectedBranchId,
+        productId,
+        quantity,
+      });
+
+      await api.put(endpoint, { quantity });
+
+      // The update succeeded. Refresh separately so a refresh issue cannot
+      // incorrectly make the save itself appear to have failed.
       setSuccess(`Stock updated for ${product.name}.`);
-      await loadSection();
+      setStockEdits((previous) => {
+        const next = { ...previous };
+        delete next[productId];
+        return next;
+      });
+
+      try {
+        const response = await api.get(
+          `/admin/branches/${selectedBranchId}/stock`
+        );
+        const data = Array.isArray(response.data)
+          ? response.data
+          : response.data?.stock;
+        setStock(Array.isArray(data) ? data : []);
+      } catch (refreshError) {
+        console.error("Stock saved, but refreshing branch stock failed:", refreshError);
+        setSuccess(
+          `Stock updated for ${product.name}, but the stock list could not refresh. Reload the page to confirm the latest value.`
+        );
+      }
     } catch (err) {
+      console.error("Branch stock update failed:", {
+        message: err?.message,
+        status: err?.response?.status,
+        response: err?.response?.data,
+        url: err?.config?.url,
+        baseURL: err?.config?.baseURL,
+        method: err?.config?.method,
+        error: err,
+      });
       setError(`Unable to update stock: ${getErrorMessage(err)}`);
     } finally {
       setSavingProductId(null);
