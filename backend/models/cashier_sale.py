@@ -27,13 +27,15 @@ class CashierSale(db.Model):
     branch_id = db.Column(
         db.Integer,
         db.ForeignKey("branches.id", ondelete="RESTRICT"),
-        nullable=False
+        nullable=False,
+        index=True
     )
 
     cashier_id = db.Column(
         db.Integer,
         db.ForeignKey("cashiers.id", ondelete="RESTRICT"),
-        nullable=False
+        nullable=False,
+        index=True
     )
 
     total = db.Column(
@@ -61,7 +63,8 @@ class CashierSale(db.Model):
     created_at = db.Column(
         db.DateTime,
         nullable=False,
-        default=datetime.utcnow
+        default=datetime.utcnow,
+        index=True
     )
 
     # Relationships
@@ -144,7 +147,8 @@ class CashierSaleItem(db.Model):
             "cashier_sales.id",
             ondelete="CASCADE"
         ),
-        nullable=False
+        nullable=False,
+        index=True
     )
 
     product_id = db.Column(
@@ -153,7 +157,8 @@ class CashierSaleItem(db.Model):
             "products.id",
             ondelete="RESTRICT"
         ),
-        nullable=False
+        nullable=False,
+        index=True
     )
 
     # Stock consumed, expressed in whole-stock-unit equivalents.
