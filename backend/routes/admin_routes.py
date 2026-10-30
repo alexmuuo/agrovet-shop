@@ -6,6 +6,9 @@ from decimal import Decimal, InvalidOperation
 from flask import Blueprint, jsonify, request, g, send_file
 from sqlalchemy import select, func
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import selectinload
+
+import math
 
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment
@@ -1860,14 +1863,10 @@ def get_branch_stock_admin(branch_id):
 # ------------------------------------------------------------
 
 
-from decimal import Decimal, InvalidOperation
-from numbers import Number
-import math
-
-from flask import jsonify, request
-from sqlalchemy.exc import IntegrityError
-
-
+@admin_bp.route(
+    "/api/admin/branches/<int:branch_id>/stock/<int:product_id>",
+    methods=["PUT"]
+)
 @admin_required
 def update_branch_stock_admin(
     branch_id,
@@ -2006,6 +2005,51 @@ def update_branch_stock_admin(
         return jsonify({
             "status": "error",
             "message": "Unable to update branch stock.",
+        }), 500
+
+
+# ------------------------------------------------------------
+# GET ALL CASHIERS
+# GET /api/admin/cashiers
+# ------------------------------------------------------------
+
+@admin_bp.route("/api/admin/cashiers", methods=["GET"])
+@admin_required
+def get_all_cashiers():
+    try:
+        cashiers = Cashier.query.order_by(
+            Cashier.username.asc()
+        ).all()
+
+        branch_names = {
+            branch.id: branch.name
+            for branch in Branch.query.all()
+        }
+
+        return jsonify({
+            "status": "success",
+            "cashiers": [
+                {
+                    "id": cashier.id,
+                    "username": cashier.username,
+                    "full_name": cashier.full_name,
+                    "is_active": cashier.is_active,
+                    "branch_id": cashier.branch_id,
+                    "branch_name": branch_names.get(
+                        cashier.branch_id
+                    ),
+                }
+                for cashier in cashiers
+            ],
+        }), 200
+
+    except Exception:
+        db.session.rollback()
+        logger.exception("Failed to retrieve cashiers.")
+
+        return jsonify({
+            "status": "error",
+            "message": "Unable to retrieve cashiers.",
         }), 500
 
 
@@ -2244,6 +2288,12 @@ def get_branch_pos_sales(branch_id):
 
         sales = (
             CashierSale.query
+            .options(
+                selectinload(CashierSale.items)
+                    .selectinload(CashierSaleItem.product),
+                selectinload(CashierSale.branch),
+                selectinload(CashierSale.cashier),
+            )
             .filter_by(
                 branch_id=branch_id
             )
@@ -2346,7 +2396,11 @@ def pos_sale_is_paid(sale):
 def get_filtered_pos_sales(start_date=None, end_date=None):
     """Return POS sales in the requested date range."""
 
-    query = CashierSale.query
+    query = CashierSale.query.options(
+        selectinload(CashierSale.payments),
+        selectinload(CashierSale.branch),
+        selectinload(CashierSale.cashier),
+    )
 
     if start_date:
         query = query.filter(
@@ -2794,6 +2848,7 @@ def get_pos_sales_report():
                     "sales_revenue": Decimal("0.00"),
                     "cost_of_goods_sold": Decimal("0.00"),
                     "gross_profit": Decimal("0.00"),
+                    "known_cost_revenue": Decimal("0.00"),
                 }
 
             daily_sales[day]["sales"] += 1
@@ -2836,30 +2891,16 @@ def get_pos_sales_report():
                 financials["profit"]
             )
 
+            daily_sales[day]["known_cost_revenue"] += (
+                financials["revenue"]
+            )
+
         results = []
 
         for day, values in sorted(
             daily_sales.items()
         ):
-            known_cost_revenue = Decimal("0.00")
-
-            for item in items:
-                financials = get_pos_item_financials(item)
-
-                if (
-                    financials is None
-                    or financials["buying_price"] is None
-                ):
-                    continue
-
-                sale = sales_by_id.get(item.sale_id)
-
-                if (
-                    sale is not None
-                    and sale.created_at
-                    and sale.created_at.date().isoformat() == day
-                ):
-                    known_cost_revenue += financials["revenue"]
+            known_cost_revenue = values["known_cost_revenue"]
 
             results.append({
                 "date": values["date"],
@@ -3421,10 +3462,29 @@ def get_all_admin_pos_sales():
         # NEWEST TRANSACTIONS FIRST
         # ----------------------------------------------------
 
-        sales = query.order_by(
-            CashierSale.created_at.desc(),
-            CashierSale.id.desc()
-        ).all()
+        limit = request.args.get("limit", default=300, type=int)
+        offset = request.args.get("offset", default=0, type=int)
+        limit = max(1, min(limit, 1000))
+        offset = max(0, offset)
+
+        total = query.order_by(None).count()
+
+        sales = (
+            query
+            .options(
+                selectinload(CashierSale.items)
+                    .selectinload(CashierSaleItem.product),
+                selectinload(CashierSale.branch),
+                selectinload(CashierSale.cashier),
+            )
+            .order_by(
+                CashierSale.created_at.desc(),
+                CashierSale.id.desc()
+            )
+            .limit(limit)
+            .offset(offset)
+            .all()
+        )
 
         # ----------------------------------------------------
         # SERIALIZE POS SALES
@@ -3436,7 +3496,9 @@ def get_all_admin_pos_sales():
                 sale.to_dict()
                 for sale in sales
             ],
-            "total": len(sales)
+            "total": total,
+            "limit": limit,
+            "offset": offset,
         }), 200
 
     except Exception:
