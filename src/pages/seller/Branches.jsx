@@ -1385,17 +1385,27 @@ function Branches() {
                           </td>
 
                           <td style={styles.td}>
-                            {transfer.items?.length ??
-                              transfer.total_products ??
-                              "—"}
-                          </td>
+  {Array.isArray(transfer.items) && transfer.items.length > 0 ? (
+    <div>
+      {transfer.items.map((item) => (
+        <div
+          key={item.id || item.product_id}
+          style={{ marginBottom: "6px" }}
+        >
+          <strong>{item.product_name || "Unknown product"}</strong>
+          {" — "}
+          {formatQuantity(item.quantity)}
+        </div>
+      ))}
+    </div>
+  ) : (
+    "No product details"
+  )}
+</td>
 
-                          <td style={styles.td}>
-                            {transfer.admin_name ||
-                              transfer.created_by_name ||
-                              "—"}
-                          </td>
-
+<td style={styles.td}>
+  {transfer.admin_username || "—"}
+</td>
                           <td style={styles.td}>
                             <span style={styles.badge}>
                               {transfer.status || "Completed"}
