@@ -2,6 +2,14 @@ import logging
 from datetime import datetime, timedelta
 from io import BytesIO
 from decimal import Decimal, InvalidOperation
+import uuid
+
+from sqlalchemy import or_
+
+from models.stock_transfer import (
+    StockTransfer,
+    StockTransferItem
+)
 
 from flask import Blueprint, jsonify, request, g, send_file
 from sqlalchemy import select, func
@@ -4663,4 +4671,535 @@ def export_all_pos_reports_excel():
         return jsonify({
             "status": "error",
             "message": "Unable to export POS reports to Excel.",
+        }), 500
+
+
+# ============================================================
+# INTERBRANCH STOCK TRANSFERS — ADMIN ONLY
+#
+# GET  /api/admin/stock-transfers
+# POST /api/admin/stock-transfers
+#
+# Transfers complete immediately.
+# Both branches update in one database transaction.
+# ============================================================
+
+
+def parse_transfer_quantity(value):
+    """
+    Validate a positive quantity with a maximum of 3
+    meaningful decimal places.
+    """
+
+    try:
+        quantity = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        raise ValueError("Invalid transfer quantity.")
+
+    if not quantity.is_finite():
+        raise ValueError("Invalid transfer quantity.")
+
+    if quantity <= 0:
+        raise ValueError(
+            "Transfer quantities must be greater than zero."
+        )
+
+    if quantity != quantity.quantize(Decimal("0.001")):
+        raise ValueError(
+            "Transfer quantities support a maximum of 3 decimal places."
+        )
+
+    if quantity > Decimal("999999999.999"):
+        raise ValueError("Transfer quantity is too large.")
+
+    return quantity
+
+
+def generate_transfer_reference():
+    timestamp = datetime.utcnow().strftime("%Y%m%d%H%M%S")
+    unique_part = uuid.uuid4().hex[:8].upper()
+
+    return f"TRF-{timestamp}-{unique_part}"
+
+
+# ============================================================
+# GET TRANSFER HISTORY
+# ============================================================
+
+@admin_bp.route(
+    "/api/admin/stock-transfers",
+    methods=["GET"]
+)
+@admin_required
+def get_stock_transfers():
+    try:
+        query = StockTransfer.query
+
+        branch_id = request.args.get(
+            "branch_id",
+            type=int
+        )
+
+        if branch_id is not None:
+            if branch_id <= 0:
+                return jsonify({
+                    "status": "error",
+                    "message": "Invalid branch ID."
+                }), 400
+
+            query = query.filter(
+                or_(
+                    StockTransfer.source_branch_id == branch_id,
+                    StockTransfer.destination_branch_id == branch_id
+                )
+            )
+
+        limit = request.args.get(
+            "limit",
+            default=100,
+            type=int
+        )
+
+        offset = request.args.get(
+            "offset",
+            default=0,
+            type=int
+        )
+
+        limit = max(1, min(limit, 500))
+        offset = max(0, offset)
+
+        total = query.order_by(None).count()
+
+        transfers = (
+            query
+            .options(
+                selectinload(StockTransfer.items)
+            )
+            .order_by(
+                StockTransfer.created_at.desc(),
+                StockTransfer.id.desc()
+            )
+            .limit(limit)
+            .offset(offset)
+            .all()
+        )
+
+        return jsonify({
+            "status": "success",
+            "transfers": [
+                transfer.to_dict()
+                for transfer in transfers
+            ],
+            "total": total,
+            "limit": limit,
+            "offset": offset
+        }), 200
+
+    except Exception:
+        db.session.rollback()
+
+        logger.exception(
+            "Failed to retrieve stock transfer history."
+        )
+
+        return jsonify({
+            "status": "error",
+            "message": "Unable to retrieve stock transfers."
+        }), 500
+
+
+# ============================================================
+# CREATE AND COMPLETE STOCK TRANSFER
+# ============================================================
+
+@admin_bp.route(
+    "/api/admin/stock-transfers",
+    methods=["POST"]
+)
+@admin_required
+def create_stock_transfer():
+
+    try:
+        data = request.get_json(silent=True) or {}
+
+        source_branch_id = data.get("source_branch_id")
+        destination_branch_id = data.get("destination_branch_id")
+        items_data = data.get("items")
+        notes = data.get("notes")
+
+        # ----------------------------------------------------
+        # VALIDATE ADMIN
+        # ----------------------------------------------------
+
+        admin_data = getattr(g, "admin", {}) or {}
+
+        if not isinstance(admin_data, dict):
+            return jsonify({
+                "status": "error",
+                "message": "Unable to identify administrator."
+            }), 401
+
+        admin_username = admin_data.get("username")
+
+        if not admin_username:
+            return jsonify({
+                "status": "error",
+                "message": "Administrator username is missing."
+            }), 401
+
+        # ----------------------------------------------------
+        # VALIDATE BRANCH IDS
+        # ----------------------------------------------------
+
+        try:
+            source_branch_id = int(source_branch_id)
+            destination_branch_id = int(destination_branch_id)
+        except (TypeError, ValueError):
+            return jsonify({
+                "status": "error",
+                "message": "Invalid source or destination branch."
+            }), 400
+
+        if source_branch_id <= 0 or destination_branch_id <= 0:
+            return jsonify({
+                "status": "error",
+                "message": "Invalid branch ID."
+            }), 400
+
+        if source_branch_id == destination_branch_id:
+            return jsonify({
+                "status": "error",
+                "message": "Source and destination branches must be different."
+            }), 400
+
+        # ----------------------------------------------------
+        # VALIDATE ITEMS
+        # ----------------------------------------------------
+
+        if not isinstance(items_data, list) or not items_data:
+            return jsonify({
+                "status": "error",
+                "message": "Add at least one product to transfer."
+            }), 400
+
+        transfer_items = []
+        seen_product_ids = set()
+
+        for item in items_data:
+
+            if not isinstance(item, dict):
+                raise ValueError("Invalid transfer item.")
+
+            try:
+                product_id = int(item.get("product_id"))
+            except (TypeError, ValueError):
+                raise ValueError("Invalid product ID.")
+
+            if product_id <= 0:
+                raise ValueError("Invalid product ID.")
+
+            if product_id in seen_product_ids:
+                raise ValueError(
+                    "A product cannot appear more than once in a transfer."
+                )
+
+            seen_product_ids.add(product_id)
+
+            quantity = parse_transfer_quantity(
+                item.get("quantity")
+            )
+
+            transfer_items.append({
+                "product_id": product_id,
+                "quantity": quantity
+            })
+
+        # ----------------------------------------------------
+        # LOCK BRANCHES
+        #
+        # Lock in consistent ID order to reduce deadlocks.
+        # ----------------------------------------------------
+
+        branch_ids = sorted([
+            source_branch_id,
+            destination_branch_id
+        ])
+
+        locked_branches = (
+            Branch.query
+            .filter(Branch.id.in_(branch_ids))
+            .order_by(Branch.id.asc())
+            .with_for_update()
+            .all()
+        )
+
+        branches = {
+            branch.id: branch
+            for branch in locked_branches
+        }
+
+        if len(branches) != 2:
+            raise ValueError(
+                "One or both selected branches do not exist."
+            )
+
+        source_branch = branches[source_branch_id]
+        destination_branch = branches[destination_branch_id]
+
+        if not source_branch.is_active:
+            raise ValueError("The source branch is inactive.")
+
+        if not destination_branch.is_active:
+            raise ValueError("The destination branch is inactive.")
+
+        # ----------------------------------------------------
+        # LOAD AND LOCK PRODUCTS
+        # ----------------------------------------------------
+
+        product_ids = [
+            item["product_id"]
+            for item in transfer_items
+        ]
+
+        products = (
+            Product.query
+            .filter(Product.id.in_(product_ids))
+            .all()
+        )
+
+        product_map = {
+            product.id: product
+            for product in products
+        }
+
+        if len(product_map) != len(product_ids):
+            raise ValueError(
+                "One or more selected products do not exist."
+            )
+
+        # ----------------------------------------------------
+        # LOCK EXISTING SOURCE AND DESTINATION STOCK
+        # ----------------------------------------------------
+
+        stock_records = (
+            BranchProductStock.query
+            .filter(
+                BranchProductStock.branch_id.in_(branch_ids),
+                BranchProductStock.product_id.in_(product_ids)
+            )
+            .order_by(
+                BranchProductStock.branch_id.asc(),
+                BranchProductStock.product_id.asc()
+            )
+            .with_for_update()
+            .all()
+        )
+
+        stock_map = {
+            (stock.branch_id, stock.product_id): stock
+            for stock in stock_records
+        }
+
+        # ----------------------------------------------------
+        # CREATE TRANSFER HEADER
+        # ----------------------------------------------------
+
+        transfer = StockTransfer(
+            reference=generate_transfer_reference(),
+            source_branch_id=source_branch_id,
+            destination_branch_id=destination_branch_id,
+            status="COMPLETED",
+            admin_username=str(admin_username)[:100],
+            notes=notes.strip() if isinstance(notes, str) and notes.strip() else None
+        )
+
+        db.session.add(transfer)
+        db.session.flush()
+
+        # ----------------------------------------------------
+        # PROCESS EACH PRODUCT
+        # ----------------------------------------------------
+
+        for item in transfer_items:
+
+            product_id = item["product_id"]
+            quantity = item["quantity"]
+
+            product = product_map[product_id]
+
+            source_stock = stock_map.get(
+                (source_branch_id, product_id)
+            )
+
+            destination_stock = stock_map.get(
+                (destination_branch_id, product_id)
+            )
+
+            if source_stock is None:
+                raise ValueError(
+                    f"Insufficient stock for {product.name}. "
+                    "The source branch has no stock record."
+                )
+
+            source_previous = Decimal(
+                str(source_stock.quantity or "0")
+            )
+
+            if source_previous < quantity:
+                raise ValueError(
+                    f"Insufficient stock for {product.name}. "
+                    f"Available: {source_previous:.3f}, "
+                    f"requested: {quantity:.3f}."
+                )
+
+            destination_previous = (
+                Decimal(str(destination_stock.quantity or "0"))
+                if destination_stock is not None
+                else Decimal("0.000")
+            )
+
+            source_new = source_previous - quantity
+            destination_new = destination_previous + quantity
+
+            # ------------------------------------------------
+            # UPDATE SOURCE STOCK
+            # ------------------------------------------------
+
+            source_stock.quantity = source_new
+
+            # ------------------------------------------------
+            # UPDATE OR CREATE DESTINATION STOCK
+            # ------------------------------------------------
+
+            if destination_stock is None:
+
+                destination_stock = BranchProductStock(
+                    branch_id=destination_branch_id,
+                    product_id=product_id,
+                    quantity=destination_new
+                )
+
+                db.session.add(destination_stock)
+
+                stock_map[
+                    (destination_branch_id, product_id)
+                ] = destination_stock
+
+            else:
+                destination_stock.quantity = destination_new
+
+            # ------------------------------------------------
+            # SAVE TRANSFER ITEM
+            # ------------------------------------------------
+
+            transfer_item = StockTransferItem(
+                transfer_id=transfer.id,
+                product_id=product_id,
+                product_name=product.name,
+                quantity=quantity,
+                source_previous_stock=source_previous,
+                source_new_stock=source_new,
+                destination_previous_stock=destination_previous,
+                destination_new_stock=destination_new
+            )
+
+            db.session.add(transfer_item)
+
+            # ------------------------------------------------
+            # SOURCE MOVEMENT: TRANSFER OUT
+            # ------------------------------------------------
+
+            db.session.add(
+                StockMovement(
+                    cashier_id=None,
+                    admin_username=str(admin_username)[:100],
+                    movement_type="TRANSFER_OUT",
+                    product_id=product_id,
+                    product_name=product.name,
+                    branch_id=source_branch_id,
+                    previous_stock=source_previous,
+                    quantity_added=quantity,
+                    new_stock=source_new,
+                    reference=transfer.reference,
+                    notes=(
+                        f"Transferred to {destination_branch.name}. "
+                        f"Transfer reference: {transfer.reference}"
+                    )
+                )
+            )
+
+            # ------------------------------------------------
+            # DESTINATION MOVEMENT: TRANSFER IN
+            # ------------------------------------------------
+
+            db.session.add(
+                StockMovement(
+                    cashier_id=None,
+                    admin_username=str(admin_username)[:100],
+                    movement_type="TRANSFER_IN",
+                    product_id=product_id,
+                    product_name=product.name,
+                    branch_id=destination_branch_id,
+                    previous_stock=destination_previous,
+                    quantity_added=quantity,
+                    new_stock=destination_new,
+                    reference=transfer.reference,
+                    notes=(
+                        f"Received from {source_branch.name}. "
+                        f"Transfer reference: {transfer.reference}"
+                    )
+                )
+            )
+
+        # ----------------------------------------------------
+        # COMMIT EVERYTHING TOGETHER
+        #
+        # If any operation fails, neither branch is updated.
+        # ----------------------------------------------------
+
+        db.session.commit()
+
+        return jsonify({
+            "status": "success",
+            "message": "Stock transfer completed successfully.",
+            "transfer": transfer.to_dict()
+        }), 201
+
+    except ValueError as error:
+
+        db.session.rollback()
+
+        return jsonify({
+            "status": "error",
+            "message": str(error)
+        }), 400
+
+    except IntegrityError:
+
+        db.session.rollback()
+
+        logger.exception(
+            "Stock transfer database integrity error."
+        )
+
+        return jsonify({
+            "status": "error",
+            "message": (
+                "The transfer could not be completed because "
+                "of a database constraint or concurrent stock update."
+            )
+        }), 409
+
+    except Exception:
+
+        db.session.rollback()
+
+        logger.exception(
+            "Failed to complete interbranch stock transfer."
+        )
+
+        return jsonify({
+            "status": "error",
+            "message": "Unable to complete stock transfer."
         }), 500
