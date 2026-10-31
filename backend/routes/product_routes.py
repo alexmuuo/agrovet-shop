@@ -1,11 +1,14 @@
 import logging
+import os
 import uuid
+
+import requests
 
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
-from flask import Blueprint, jsonify, request, send_from_directory
+from flask import Blueprint, jsonify, redirect, request, send_from_directory
 from werkzeug.utils import secure_filename
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -28,7 +31,16 @@ logger = logging.getLogger(__name__)
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 PRODUCT_IMAGE_DIR = BACKEND_DIR / "uploads" / "products"
 
-MAX_IMAGE_SIZE = 5 * 1024 * 1024
+# Vercel limits request bodies to 4.5 MB, so keep uploads below that.
+MAX_IMAGE_SIZE = 4 * 1024 * 1024
+
+# Product images are stored in Supabase Storage when these environment
+# variables are set (required on Vercel, whose filesystem is read-only):
+#   SUPABASE_URL                e.g. https://abcdxyz.supabase.co
+#   SUPABASE_SERVICE_ROLE_KEY   server-side secret key (never expose it)
+#   SUPABASE_STORAGE_BUCKET     public bucket name (default: product-images)
+# Without them, images are saved to backend/uploads/products (local dev).
+STORAGE_FOLDER = "products"
 
 ALLOWED_IMAGE_EXTENSIONS = {"jpg", "jpeg", "png", "webp", "gif"}
 
@@ -66,7 +78,7 @@ def validate_image_file(file):
     file.stream.seek(0)
 
     if len(image_bytes) > MAX_IMAGE_SIZE:
-        return False, "Image size must not exceed 5 MB."
+        return False, "Image size must not exceed 4 MB."
 
     if not image_bytes:
         return False, "The uploaded image is empty."
@@ -94,12 +106,85 @@ def validate_image_file(file):
     return True, None
 
 
-def save_product_image(file):
-    ensure_image_directory()
+def get_storage_config():
+    """Return Supabase Storage settings, or None if not configured."""
+    url = (os.getenv("SUPABASE_URL") or "").strip().rstrip("/")
+    key = (os.getenv("SUPABASE_SERVICE_ROLE_KEY") or "").strip()
+    bucket = (
+        os.getenv("SUPABASE_STORAGE_BUCKET") or "product-images"
+    ).strip()
 
+    if not url or not key:
+        return None
+
+    return {"url": url, "key": key, "bucket": bucket}
+
+
+def storage_headers(storage, content_type=None):
+    headers = {"apikey": storage["key"]}
+
+    # Legacy service-role keys are JWTs and are sent as a bearer token.
+    # Newer "sb_secret_..." keys are only sent in the apikey header.
+    if storage["key"].startswith("eyJ"):
+        headers["Authorization"] = f"Bearer {storage['key']}"
+
+    if content_type:
+        headers["Content-Type"] = content_type
+
+    return headers
+
+
+def storage_object_url(storage, filename):
+    return (
+        f"{storage['url']}/storage/v1/object/"
+        f"{storage['bucket']}/{STORAGE_FOLDER}/{quote(filename)}"
+    )
+
+
+def storage_public_url(storage, filename):
+    return (
+        f"{storage['url']}/storage/v1/object/public/"
+        f"{storage['bucket']}/{STORAGE_FOLDER}/{quote(filename)}"
+    )
+
+
+def save_product_image(file):
     original_name = secure_filename(file.filename)
     extension = original_name.rsplit(".", 1)[1].lower()
     unique_filename = f"{uuid.uuid4().hex}.{extension}"
+
+    storage = get_storage_config()
+
+    if storage:
+        file.stream.seek(0)
+        image_bytes = file.stream.read()
+
+        response = requests.post(
+            storage_object_url(storage, unique_filename),
+            headers={
+                **storage_headers(storage, file.mimetype),
+                "x-upsert": "false",
+            },
+            data=image_bytes,
+            timeout=20,
+        )
+
+        if response.status_code not in (200, 201):
+            raise RuntimeError(
+                "Supabase Storage upload failed "
+                f"({response.status_code}): {response.text[:200]}"
+            )
+
+        return storage_public_url(storage, unique_filename)
+
+    if os.getenv("VERCEL"):
+        raise RuntimeError(
+            "Image storage is not configured. Set SUPABASE_URL and "
+            "SUPABASE_SERVICE_ROLE_KEY in the Vercel environment variables."
+        )
+
+    # Local development fallback: save to backend/uploads/products.
+    ensure_image_directory()
 
     destination = PRODUCT_IMAGE_DIR / unique_filename
     file.save(str(destination))
@@ -107,10 +192,44 @@ def save_product_image(file):
     return f"/api/product-images/{unique_filename}"
 
 
-def delete_local_product_image(image_path):
+def delete_storage_image(storage, filename):
+    try:
+        requests.delete(
+            storage_object_url(storage, filename),
+            headers=storage_headers(storage),
+            timeout=10,
+        )
+    except requests.RequestException:
+        logger.exception("Could not delete stored image: %s", filename)
+
+
+def delete_product_image(image_path):
+    """
+    Delete a product image that this app stored: either a Supabase Storage
+    object (public URL) or a legacy /api/product-images/<file> path.
+    External image URLs are left alone.
+    """
     if not image_path:
         return
 
+    storage = get_storage_config()
+
+    # Image stored in Supabase Storage.
+    if storage:
+        public_prefix = (
+            f"{storage['url']}/storage/v1/object/public/"
+            f"{storage['bucket']}/{STORAGE_FOLDER}/"
+        )
+
+        if image_path.startswith(public_prefix):
+            filename = image_path[len(public_prefix):]
+
+            if filename and "/" not in filename:
+                delete_storage_image(storage, filename)
+
+            return
+
+    # Legacy path: /api/product-images/<file>
     prefix = "/api/product-images/"
 
     if not image_path.startswith(prefix):
@@ -128,6 +247,10 @@ def delete_local_product_image(image_path):
             target.unlink()
     except OSError:
         logger.exception("Could not delete product image: %s", filename)
+
+    # If the file was copied into the bucket, remove that copy too.
+    if storage:
+        delete_storage_image(storage, filename)
 
 
 # ============================================================
@@ -328,17 +451,37 @@ def get_product_image(filename):
             "message": "Image not found.",
         }), 404
 
-    ensure_image_directory()
+    # Local file (development, or an old image still on disk).
+    if (PRODUCT_IMAGE_DIR / filename).is_file():
+        response = send_from_directory(
+            str(PRODUCT_IMAGE_DIR),
+            filename,
+            conditional=True,
+        )
 
-    response = send_from_directory(
-        str(PRODUCT_IMAGE_DIR),
-        filename,
-        conditional=True,
-    )
+        response.headers["X-Content-Type-Options"] = "nosniff"
 
-    response.headers["X-Content-Type-Options"] = "nosniff"
+        return response
 
-    return response
+    # Older products store /api/product-images/<file> in the database.
+    # On Vercel those files live in the Supabase Storage bucket instead,
+    # so send the browser there.
+    storage = get_storage_config()
+
+    if storage:
+        response = redirect(
+            storage_public_url(storage, filename),
+            code=302,
+        )
+
+        response.headers["Cache-Control"] = "public, max-age=3600"
+
+        return response
+
+    return jsonify({
+        "status": "error",
+        "message": "Image not found.",
+    }), 404
 
 
 # ============================================================
@@ -551,7 +694,7 @@ def create_product():
         db.session.rollback()
 
         if saved_image_path:
-            delete_local_product_image(saved_image_path)
+            delete_product_image(saved_image_path)
 
         logger.exception("Database constraint failure while creating product.")
 
@@ -564,7 +707,7 @@ def create_product():
         db.session.rollback()
 
         if saved_image_path:
-            delete_local_product_image(saved_image_path)
+            delete_product_image(saved_image_path)
 
         logger.exception("Failed to create product.")
 
@@ -714,7 +857,7 @@ def update_product(product_id):
         db.session.commit()
 
         if old_image_path and old_image_path != product.image:
-            delete_local_product_image(old_image_path)
+            delete_product_image(old_image_path)
 
         return jsonify({
             "status": "success",
@@ -726,7 +869,7 @@ def update_product(product_id):
         db.session.rollback()
 
         if saved_image_path:
-            delete_local_product_image(saved_image_path)
+            delete_product_image(saved_image_path)
 
         logger.exception("Database constraint failure while updating product.")
 
@@ -739,7 +882,7 @@ def update_product(product_id):
         db.session.rollback()
 
         if saved_image_path:
-            delete_local_product_image(saved_image_path)
+            delete_product_image(saved_image_path)
 
         logger.exception("Failed to update product.")
 

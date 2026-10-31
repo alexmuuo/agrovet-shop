@@ -131,8 +131,8 @@ function Products() {
       event.target.value = "";
       return;
     }
-    if (file.size > 5 * 1024 * 1024) {
-      setImageError("The image is too large. Please select an image under 5 MB.");
+    if (file.size > 4 * 1024 * 1024) {
+      setImageError("The image is too large. Please select an image under 4 MB.");
       event.target.value = "";
       return;
     }
@@ -536,7 +536,7 @@ function Products() {
                   <label className="form-label fw-semibold">Upload Product Image</label>
                   <div className="border rounded-3 p-3">
                     <input ref={fileInputRef} type="file" accept="image/jpeg,image/png,image/webp,image/gif" className="form-control" onChange={handleImageSelect} />
-                    <small className="text-muted d-block mt-2">Supported formats: JPG, PNG, WEBP and GIF. Maximum size: 5 MB.</small>
+                    <small className="text-muted d-block mt-2">Supported formats: JPG, PNG, WEBP and GIF. Maximum size: 4 MB.</small>
                     {selectedImage && <div className="mt-2 small text-success"><i className="bi bi-check-circle me-1"></i>Selected: {selectedImage.name}</div>}
                     {imagePreview && <div className="mt-3">
                       <p className="small fw-semibold mb-2">Image Preview</p>

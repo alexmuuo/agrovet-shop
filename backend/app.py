@@ -50,6 +50,21 @@ if DATABASE_URL.startswith("postgres://"):
 app.config["SQLALCHEMY_DATABASE_URI"] = DATABASE_URL
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 
+# Serverless-friendly connection settings.
+# Every Vercel function instance opens its own connection pool, so keep
+# the pool small. Use the Supabase *pooler* connection string in
+# DATABASE_URL (Supabase dashboard -> Connect -> Transaction pooler).
+engine_options = {
+    "pool_pre_ping": True,
+    "pool_recycle": 300,
+}
+
+if DATABASE_URL.startswith("postgresql"):
+    engine_options["pool_size"] = int(os.getenv("DB_POOL_SIZE", "2"))
+    engine_options["max_overflow"] = int(os.getenv("DB_MAX_OVERFLOW", "0"))
+
+app.config["SQLALCHEMY_ENGINE_OPTIONS"] = engine_options
+
 
 # --------------------------------------------------
 # EMAIL CONFIGURATION — GMAIL SMTP
@@ -87,7 +102,17 @@ mail = Mail(app)
 allowed_origins = [
     "http://localhost:5173",
     "https://agrovet-shop.vercel.app",
-     "https://headmasterliquors.vercel.app"
+    "https://headmasterliquors.vercel.app",
+]
+
+# Optional extra origins (for example a custom domain), set in the
+# CORS_ORIGINS environment variable as a comma-separated list.
+# The frontend and API share one origin on Vercel, so this is only
+# needed if the API is called from a different domain.
+allowed_origins += [
+    origin.strip().rstrip("/")
+    for origin in os.getenv("CORS_ORIGINS", "").split(",")
+    if origin.strip()
 ]
 
 CORS(
