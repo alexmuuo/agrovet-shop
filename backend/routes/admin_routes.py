@@ -1876,6 +1876,83 @@ def get_branch_stock_admin(branch_id):
 
 
 # ------------------------------------------------------------
+# GET PRODUCTS AVAILABLE AS INTERBRANCH TRANSFER DESTINATIONS
+# GET /api/admin/branches/<branch_id>/transfer-products
+#
+# Unlike the ordinary branch-stock endpoint, this includes every
+# active catalog product. Products without a stock row are returned
+# with quantity 0 so the admin can deliberately select them as the
+# destination product for a transfer.
+# ------------------------------------------------------------
+
+@admin_bp.route(
+    "/api/admin/branches/<int:branch_id>/transfer-products",
+    methods=["GET"]
+)
+@admin_required
+def get_branch_transfer_products(branch_id):
+    try:
+        branch = db.session.get(Branch, branch_id)
+        if branch is None:
+            return jsonify({
+                "status": "error",
+                "message": "Branch not found."
+            }), 404
+
+        if not branch.is_active:
+            return jsonify({
+                "status": "error",
+                "message": "The selected branch is inactive."
+            }), 400
+
+        rows = (
+            db.session.query(Product, BranchProductStock.quantity)
+            .outerjoin(
+                BranchProductStock,
+                (BranchProductStock.product_id == Product.id)
+                & (BranchProductStock.branch_id == branch_id)
+            )
+            .filter(Product.is_active.is_(True))
+            .order_by(Product.name.asc(), Product.id.asc())
+            .all()
+        )
+
+        products = []
+        for product, quantity in rows:
+            products.append({
+                "id": product.id,
+                "product_id": product.id,
+                "name": product.name,
+                "category": product.category,
+                "price": float(product.price or 0),
+                "quantity": float(quantity or 0),
+                "branch_stock": float(quantity or 0),
+                "has_stock_record": quantity is not None,
+            })
+
+        return jsonify({
+            "status": "success",
+            "branch": {
+                "id": branch.id,
+                "name": branch.name,
+                "code": branch.code,
+            },
+            "products": products,
+        }), 200
+
+    except Exception:
+        db.session.rollback()
+        logger.exception(
+            "Failed to retrieve transfer destination products for branch ID %s.",
+            branch_id
+        )
+        return jsonify({
+            "status": "error",
+            "message": "Unable to load destination products."
+        }), 500
+
+
+# ------------------------------------------------------------
 # UPDATE BRANCH STOCK
 # PUT /api/admin/branches/<branch_id>/stock/<product_id>
 #
@@ -4745,13 +4822,10 @@ def generate_transfer_reference():
 )
 @admin_required
 def get_stock_transfers():
+    """Return paginated transfer history, including both product names."""
     try:
         query = StockTransfer.query
-
-        branch_id = request.args.get(
-            "branch_id",
-            type=int
-        )
+        branch_id = request.args.get("branch_id", type=int)
 
         if branch_id is not None:
             if branch_id <= 0:
@@ -4759,51 +4833,53 @@ def get_stock_transfers():
                     "status": "error",
                     "message": "Invalid branch ID."
                 }), 400
+            query = query.filter(or_(
+                StockTransfer.source_branch_id == branch_id,
+                StockTransfer.destination_branch_id == branch_id
+            ))
 
-            query = query.filter(
-                or_(
-                    StockTransfer.source_branch_id == branch_id,
-                    StockTransfer.destination_branch_id == branch_id
-                )
-            )
-
-        limit = request.args.get(
-            "limit",
-            default=100,
-            type=int
-        )
-
-        offset = request.args.get(
-            "offset",
-            default=0,
-            type=int
-        )
-
-        limit = max(1, min(limit, 500))
-        offset = max(0, offset)
-
+        limit = max(1, min(request.args.get("limit", default=100, type=int) or 100, 500))
+        offset = max(0, request.args.get("offset", default=0, type=int) or 0)
         total = query.order_by(None).count()
 
         transfers = (
-            query
-            .options(
-                selectinload(StockTransfer.items)
-            )
-            .order_by(
-                StockTransfer.created_at.desc(),
-                StockTransfer.id.desc()
-            )
+            query.options(selectinload(StockTransfer.items))
+            .order_by(StockTransfer.created_at.desc(), StockTransfer.id.desc())
             .limit(limit)
             .offset(offset)
             .all()
         )
 
+        serialized = []
+        for transfer in transfers:
+            item_data = transfer.to_dict()
+            serialized_items = item_data.get("items", []) or []
+            destination_ids = {
+                getattr(item, "destination_product_id", None)
+                for item in (transfer.items or [])
+                if getattr(item, "destination_product_id", None) is not None
+            }
+            destination_products = {}
+            if destination_ids:
+                destination_products = {
+                    product.id: product.name
+                    for product in Product.query.filter(Product.id.in_(destination_ids)).all()
+                }
+
+            # Preserve the model's item order and all existing keys.
+            for index, item in enumerate(transfer.items or []):
+                if index < len(serialized_items):
+                    destination_id = getattr(item, "destination_product_id", None)
+                    serialized_items[index]["destination_product_id"] = destination_id
+                    serialized_items[index]["destination_product_name"] = (
+                        destination_products.get(destination_id) or "Unknown product"
+                    )
+            item_data["items"] = serialized_items
+            serialized.append(item_data)
+
         return jsonify({
             "status": "success",
-            "transfers": [
-                transfer.to_dict()
-                for transfer in transfers
-            ],
+            "transfers": serialized,
             "total": total,
             "limit": limit,
             "offset": offset
@@ -4811,20 +4887,12 @@ def get_stock_transfers():
 
     except Exception:
         db.session.rollback()
-
-        logger.exception(
-            "Failed to retrieve stock transfer history."
-        )
-
+        logger.exception("Failed to retrieve stock transfer history.")
         return jsonify({
             "status": "error",
             "message": "Unable to retrieve stock transfers."
         }), 500
 
-
-# ============================================================
-# CREATE AND COMPLETE STOCK TRANSFER
-# ============================================================
 
 @admin_bp.route(
     "/api/admin/stock-transfers",
@@ -4832,7 +4900,24 @@ def get_stock_transfers():
 )
 @admin_required
 def create_stock_transfer():
-    """Transfer stock between branches without creating duplicate products."""
+    """
+    Transfer stock between branches using an explicitly selected
+    source product and destination product for every line item.
+
+    Required payload:
+    {
+      "source_branch_id": 1,
+      "destination_branch_id": 2,
+      "items": [
+        {
+          "product_id": 15,
+          "destination_product_id": 42,
+          "quantity": "2.500"
+        }
+      ],
+      "notes": "Optional"
+    }
+    """
     try:
         data = request.get_json(silent=True) or {}
         source_branch_id = data.get("source_branch_id")
@@ -4840,61 +4925,67 @@ def create_stock_transfer():
         items_data = data.get("items")
         notes = data.get("notes")
 
-        admin_data = getattr(g, "admin", {}) or {}
-        if not isinstance(admin_data, dict):
-            return jsonify({
-                "status": "error",
-                "message": "Unable to identify administrator."
-            }), 401
-
-        admin_username = admin_data.get("username")
-        if not isinstance(admin_username, str) or not admin_username.strip():
-            return jsonify({
-                "status": "error",
-                "message": "Administrator username is missing."
-            }), 401
-        admin_username = admin_username.strip()[:100]
+        # Support admin context stored as either a dictionary or object.
+        admin_context = getattr(g, "admin", None)
+        admin_username = None
+        if isinstance(admin_context, dict):
+            admin_username = admin_context.get("username") or admin_context.get("name")
+        elif admin_context is not None:
+            admin_username = getattr(admin_context, "username", None) or getattr(admin_context, "name", None)
+        admin_username = (
+            admin_username
+            or getattr(g, "admin_username", None)
+            or "Admin"
+        )
+        admin_username = str(admin_username).strip()[:100] or "Admin"
 
         try:
             source_branch_id = int(source_branch_id)
             destination_branch_id = int(destination_branch_id)
         except (TypeError, ValueError):
-            raise ValueError("Invalid source or destination branch.")
+            raise ValueError("Select valid source and destination branches.")
 
         if source_branch_id <= 0 or destination_branch_id <= 0:
-            raise ValueError("Invalid branch ID.")
+            raise ValueError("Select valid source and destination branches.")
         if source_branch_id == destination_branch_id:
             raise ValueError("Source and destination branches must be different.")
         if not isinstance(items_data, list) or not items_data:
-            raise ValueError("Add at least one product to transfer.")
+            raise ValueError("Add at least one product to the transfer.")
 
-        transfer_items = []
-        seen_product_ids = set()
-        for item in items_data:
+        validated_items = []
+        seen_pairs = set()
+        for index, item in enumerate(items_data, start=1):
             if not isinstance(item, dict):
-                raise ValueError("Invalid transfer item.")
+                raise ValueError(f"Transfer item {index} is invalid.")
             try:
-                product_id = int(item.get("product_id"))
+                source_product_id = int(item.get("product_id"))
+                destination_product_id = int(item.get("destination_product_id"))
             except (TypeError, ValueError):
-                raise ValueError("Invalid product ID.")
-            if product_id <= 0:
-                raise ValueError("Invalid product ID.")
-            if product_id in seen_product_ids:
                 raise ValueError(
-                    "A product cannot appear more than once in a transfer."
+                    f"Select both source and destination products for item {index}."
                 )
-            seen_product_ids.add(product_id)
-            quantity = parse_transfer_quantity(item.get("quantity"))
-            transfer_items.append({
-                "product_id": product_id,
-                "quantity": quantity
+
+            if source_product_id <= 0 or destination_product_id <= 0:
+                raise ValueError(f"Invalid product selection in transfer item {index}.")
+
+            pair = (source_product_id, destination_product_id)
+            if pair in seen_pairs:
+                raise ValueError(
+                    "The same source/destination product pair cannot appear twice. "
+                    "Combine its quantities into one line."
+                )
+            seen_pairs.add(pair)
+
+            validated_items.append({
+                "product_id": source_product_id,
+                "destination_product_id": destination_product_id,
+                "quantity": parse_transfer_quantity(item.get("quantity")),
             })
 
-        # Lock both branch rows in a consistent order.
-        branch_ids = sorted([source_branch_id, destination_branch_id])
+        # Lock branches in ascending order to reduce deadlock risk.
+        branch_ids = sorted((source_branch_id, destination_branch_id))
         locked_branches = (
-            Branch.query
-            .filter(Branch.id.in_(branch_ids))
+            Branch.query.filter(Branch.id.in_(branch_ids))
             .order_by(Branch.id.asc())
             .with_for_update()
             .all()
@@ -4921,133 +5012,78 @@ def create_stock_transfer():
         db.session.add(transfer)
         db.session.flush()
 
-        for item in transfer_items:
+        for item in validated_items:
             source_product_id = item["product_id"]
+            destination_product_id = item["destination_product_id"]
             quantity = item["quantity"]
 
-            source_product = (
-                Product.query
-                .filter(Product.id == source_product_id)
+            # Lock both selected products and validate they exist and are active.
+            product_ids = sorted({source_product_id, destination_product_id})
+            products = (
+                Product.query.filter(Product.id.in_(product_ids))
+                .order_by(Product.id.asc())
                 .with_for_update()
-                .first()
+                .all()
             )
+            products_by_id = {product.id: product for product in products}
+            source_product = products_by_id.get(source_product_id)
+            destination_product = products_by_id.get(destination_product_id)
+
             if source_product is None:
-                raise ValueError(f"Product ID {source_product_id} does not exist.")
+                raise ValueError(f"Source product ID {source_product_id} does not exist.")
+            if destination_product is None:
+                raise ValueError(f"Destination product ID {destination_product_id} does not exist.")
             if not source_product.is_active:
-                raise ValueError(f"{source_product.name} is inactive.")
+                raise ValueError(f"Source product '{source_product.name}' is inactive.")
+            if not destination_product.is_active:
+                raise ValueError(f"Destination product '{destination_product.name}' is inactive.")
 
-            normalized_name = source_product.name.strip().casefold()
-
+            # Lock the source stock row. It must already exist because this
+            # product is selected from the source branch's current stock list.
             source_stock = (
                 BranchProductStock.query
-                .filter_by(
-                    branch_id=source_branch_id,
-                    product_id=source_product_id
-                )
+                .filter_by(branch_id=source_branch_id, product_id=source_product_id)
                 .with_for_update()
                 .first()
             )
             if source_stock is None:
                 raise ValueError(
-                    f"{source_product.name} has no stock record in {source_branch.name}."
+                    f"'{source_product.name}' has no stock record in {source_branch.name}."
                 )
+
+            # Lock destination stock if present. If absent, create a zero row
+            # for the explicitly selected destination catalog product.
+            destination_stock = (
+                BranchProductStock.query
+                .filter_by(branch_id=destination_branch_id, product_id=destination_product_id)
+                .with_for_update()
+                .first()
+            )
+            if destination_stock is None:
+                destination_stock = BranchProductStock(
+                    branch_id=destination_branch_id,
+                    product_id=destination_product_id,
+                    quantity=Decimal("0.000")
+                )
+                db.session.add(destination_stock)
+                db.session.flush()
 
             source_previous = Decimal(str(source_stock.quantity or "0.000"))
+            destination_previous = Decimal(str(destination_stock.quantity or "0.000"))
+
             if source_previous < quantity:
                 raise ValueError(
-                    f"Insufficient stock for {source_product.name}. "
-                    f"Available: {source_previous:.3f}, requested: {quantity:.3f}."
+                    f"Insufficient stock for '{source_product.name}' in {source_branch.name}. "
+                    f"Available: {source_previous:.3f}; requested: {quantity:.3f}."
                 )
 
-            # First look for exactly one matching product already stocked
-            # in the destination branch. This is the normal cross-ID case.
-            destination_stock_matches = (
-                db.session.query(BranchProductStock, Product)
-                .join(Product, Product.id == BranchProductStock.product_id)
-                .filter(
-                    BranchProductStock.branch_id == destination_branch_id,
-                    func.lower(func.trim(Product.name)) == normalized_name
-                )
-                .order_by(Product.id.asc())
-                .with_for_update()
-                .all()
-            )
-
-            if len(destination_stock_matches) > 1:
-                raise ValueError(
-                    f"More than one '{source_product.name}' product exists in "
-                    f"{destination_branch.name}. Resolve the duplicate inventory "
-                    "before transferring this product."
-                )
-
-            if destination_stock_matches:
-                destination_stock, destination_product = destination_stock_matches[0]
-            else:
-                # No branch stock row exists yet. Resolve a single catalog
-                # product by exact normalized name; never invent a new Product.
-                catalog_matches = (
-                    Product.query
-                    .filter(func.lower(func.trim(Product.name)) == normalized_name)
-                    .order_by(Product.id.asc())
-                    .with_for_update()
-                    .all()
-                )
-                alternatives = [
-                    product for product in catalog_matches
-                    if product.id != source_product_id
-                ]
-
-                if len(alternatives) == 1:
-                    destination_product = alternatives[0]
-                elif len(alternatives) > 1:
-                    raise ValueError(
-                        f"Several catalog products are named '{source_product.name}'. "
-                        "The destination product cannot be identified safely."
-                    )
-                elif len(catalog_matches) == 1:
-                    destination_product = source_product
-                else:
-                    raise ValueError(
-                        f"No matching '{source_product.name}' product exists for "
-                        f"{destination_branch.name}. Add or resolve the destination "
-                        "product before transferring. No duplicate product was created."
-                    )
-
-                if not destination_product.is_active:
-                    raise ValueError(
-                        f"The matching destination product '{destination_product.name}' is inactive."
-                    )
-
-                destination_stock = (
-                    BranchProductStock.query
-                    .filter_by(
-                        branch_id=destination_branch_id,
-                        product_id=destination_product.id
-                    )
-                    .with_for_update()
-                    .first()
-                )
-                if destination_stock is None:
-                    destination_stock = BranchProductStock(
-                        branch_id=destination_branch_id,
-                        product_id=destination_product.id,
-                        quantity=Decimal("0.000")
-                    )
-                    db.session.add(destination_stock)
-                    db.session.flush()
-
-            destination_product_id = destination_product.id
-            destination_previous = Decimal(
-                str(destination_stock.quantity or "0.000")
-            )
             source_new = source_previous - quantity
             destination_new = destination_previous + quantity
-
             if source_new < 0:
                 raise ValueError("The transfer would make source stock negative.")
             if destination_new > Decimal("999999999.999"):
                 raise ValueError(
-                    f"The destination stock limit would be exceeded for {destination_product.name}."
+                    f"The destination stock limit would be exceeded for '{destination_product.name}'."
                 )
 
             source_stock.quantity = source_new
@@ -5077,8 +5113,8 @@ def create_stock_transfer():
                 new_stock=source_new,
                 reference=transfer.reference,
                 notes=(
-                    f"Transferred to {destination_branch.name}. "
-                    f"Transfer reference: {transfer.reference}"
+                    f"Transferred {quantity:.3f} of '{source_product.name}' "
+                    f"to '{destination_product.name}' at {destination_branch.name}."
                 )
             ))
 
@@ -5094,16 +5130,31 @@ def create_stock_transfer():
                 new_stock=destination_new,
                 reference=transfer.reference,
                 notes=(
-                    f"Received from {source_branch.name}. "
-                    f"Transfer reference: {transfer.reference}"
+                    f"Received {quantity:.3f} of '{destination_product.name}' "
+                    f"from '{source_product.name}' at {source_branch.name}."
                 )
             ))
 
         db.session.commit()
+
+        # Add destination product labels to the immediate response as well.
+        result = transfer.to_dict()
+        result_items = result.get("items", []) or []
+        for index, item in enumerate(transfer.items or []):
+            if index < len(result_items):
+                result_items[index]["destination_product_id"] = item.destination_product_id
+                result_items[index]["destination_product_name"] = (
+                    item.destination_product.name
+                    if getattr(item, "destination_product", None)
+                    else (Product.query.get(item.destination_product_id).name
+                          if Product.query.get(item.destination_product_id) else "Unknown product")
+                )
+        result["items"] = result_items
+
         return jsonify({
             "status": "success",
             "message": "Stock transfer completed successfully.",
-            "transfer": transfer.to_dict()
+            "transfer": result
         }), 201
 
     except ValueError as error:
@@ -5129,5 +5180,6 @@ def create_stock_transfer():
         logger.exception("Failed to complete interbranch stock transfer.")
         return jsonify({
             "status": "error",
-            "message": "Unable to complete stock transfer."
+            "message": "Unable to complete stock transfer. Check the server logs."
         }), 500
+
