@@ -5203,3 +5203,413 @@ def create_stock_transfer():
             "status": "error",
             "message": "Unable to complete stock transfer."
         }), 500
+@admin_bp.route(
+    "/api/admin/stock-transfers",
+    methods=["POST"]
+)
+@admin_required
+def create_stock_transfer():
+
+    try:
+        data = request.get_json(silent=True) or {}
+
+        source_branch_id = data.get("source_branch_id")
+        destination_branch_id = data.get("destination_branch_id")
+        items_data = data.get("items")
+        notes = data.get("notes")
+
+        # ----------------------------------------------------
+        # VALIDATE ADMIN
+        # ----------------------------------------------------
+
+        admin_data = getattr(g, "admin", {}) or {}
+
+        if not isinstance(admin_data, dict):
+            return jsonify({
+                "status": "error",
+                "message": "Unable to identify administrator."
+            }), 401
+
+        admin_username = admin_data.get("username")
+
+        if not admin_username:
+            return jsonify({
+                "status": "error",
+                "message": "Administrator username is missing."
+            }), 401
+
+        # ----------------------------------------------------
+        # VALIDATE BRANCHES
+        # ----------------------------------------------------
+
+        try:
+            source_branch_id = int(source_branch_id)
+            destination_branch_id = int(destination_branch_id)
+        except (TypeError, ValueError):
+            raise ValueError("Invalid source or destination branch.")
+
+        if source_branch_id <= 0 or destination_branch_id <= 0:
+            raise ValueError("Invalid branch ID.")
+
+        if source_branch_id == destination_branch_id:
+            raise ValueError(
+                "Source and destination branches must be different."
+            )
+
+        if not isinstance(items_data, list) or not items_data:
+            raise ValueError(
+                "Add at least one product to transfer."
+            )
+
+        # ----------------------------------------------------
+        # VALIDATE TRANSFER ITEMS
+        # ----------------------------------------------------
+
+        transfer_items = []
+        seen_product_ids = set()
+
+        for item in items_data:
+
+            if not isinstance(item, dict):
+                raise ValueError("Invalid transfer item.")
+
+            try:
+                product_id = int(item.get("product_id"))
+            except (TypeError, ValueError):
+                raise ValueError("Invalid product ID.")
+
+            if product_id <= 0:
+                raise ValueError("Invalid product ID.")
+
+            if product_id in seen_product_ids:
+                raise ValueError(
+                    "A product cannot appear more than once "
+                    "in a transfer."
+                )
+
+            seen_product_ids.add(product_id)
+
+            quantity = parse_transfer_quantity(
+                item.get("quantity")
+            )
+
+            transfer_items.append({
+                "product_id": product_id,
+                "quantity": quantity
+            })
+
+        # ----------------------------------------------------
+        # LOCK BRANCHES
+        # ----------------------------------------------------
+
+        branch_ids = sorted([
+            source_branch_id,
+            destination_branch_id
+        ])
+
+        locked_branches = (
+            Branch.query
+            .filter(Branch.id.in_(branch_ids))
+            .order_by(Branch.id.asc())
+            .with_for_update()
+            .all()
+        )
+
+        branches = {
+            branch.id: branch
+            for branch in locked_branches
+        }
+
+        if len(branches) != 2:
+            raise ValueError(
+                "One or both selected branches do not exist."
+            )
+
+        source_branch = branches[source_branch_id]
+        destination_branch = branches[destination_branch_id]
+
+        if not source_branch.is_active:
+            raise ValueError("The source branch is inactive.")
+
+        if not destination_branch.is_active:
+            raise ValueError("The destination branch is inactive.")
+
+        # ----------------------------------------------------
+        # CREATE TRANSFER HEADER
+        # ----------------------------------------------------
+
+        transfer = StockTransfer(
+            reference=generate_transfer_reference(),
+            source_branch_id=source_branch_id,
+            destination_branch_id=destination_branch_id,
+            status="COMPLETED",
+            admin_username=str(admin_username)[:100],
+            notes=(
+                notes.strip()
+                if isinstance(notes, str) and notes.strip()
+                else None
+            )
+        )
+
+        db.session.add(transfer)
+        db.session.flush()
+
+        # ----------------------------------------------------
+        # PROCESS TRANSFER ITEMS
+        # ----------------------------------------------------
+
+        for item in transfer_items:
+
+            source_product_id = item["product_id"]
+            quantity = item["quantity"]
+
+            # -----------------------------------------------
+            # FIND AND LOCK SOURCE PRODUCT
+            # -----------------------------------------------
+
+            source_product = (
+                Product.query
+                .filter_by(id=source_product_id)
+                .with_for_update()
+                .first()
+            )
+
+            if source_product is None:
+                raise ValueError(
+                    f"Product ID {source_product_id} does not exist."
+                )
+
+            if not source_product.is_active:
+                raise ValueError(
+                    f"{source_product.name} is inactive."
+                )
+
+            # Normalize name for matching.
+            normalized_name = source_product.name.strip().lower()
+
+            # -----------------------------------------------
+            # FIND AND LOCK SOURCE STOCK
+            # -----------------------------------------------
+
+            source_stock = (
+                BranchProductStock.query
+                .filter_by(
+                    branch_id=source_branch_id,
+                    product_id=source_product_id
+                )
+                .with_for_update()
+                .first()
+            )
+
+            if source_stock is None:
+                raise ValueError(
+                    f"{source_product.name} has no stock record "
+                    f"in {source_branch.name}."
+                )
+
+            source_previous = Decimal(
+                str(source_stock.quantity or "0")
+            )
+
+            if source_previous < quantity:
+                raise ValueError(
+                    f"Insufficient stock for {source_product.name}. "
+                    f"Available: {source_previous:.3f}, "
+                    f"requested: {quantity:.3f}."
+                )
+
+            # -----------------------------------------------
+            # FIND DESTINATION PRODUCT BY NAME
+            #
+            # IMPORTANT:
+            # Destination product ID may differ from source ID.
+            # -----------------------------------------------
+
+            destination_matches = (
+                db.session.query(
+                    BranchProductStock,
+                    Product
+                )
+                .join(
+                    Product,
+                    Product.id == BranchProductStock.product_id
+                )
+                .filter(
+                    BranchProductStock.branch_id == destination_branch_id,
+                    func.lower(func.trim(Product.name)) == normalized_name
+                )
+                .order_by(Product.id.asc())
+                .with_for_update()
+                .all()
+            )
+
+            if len(destination_matches) > 1:
+                raise ValueError(
+                    f"Multiple products named '{source_product.name}' "
+                    f"exist in {destination_branch.name}. "
+                    "Resolve the duplicate products before transferring."
+                )
+
+            # -----------------------------------------------
+            # RESOLVE DESTINATION PRODUCT AND STOCK
+            # -----------------------------------------------
+
+            if destination_matches:
+
+                destination_stock, destination_product = (
+                    destination_matches[0]
+                )
+
+                destination_product_id = destination_product.id
+
+            else:
+
+                # No matching destination inventory exists.
+                # Use the source product ID for a new stock row.
+                destination_product = source_product
+                destination_product_id = source_product_id
+
+                destination_stock = BranchProductStock(
+                    branch_id=destination_branch_id,
+                    product_id=destination_product_id,
+                    quantity=Decimal("0.000")
+                )
+
+                db.session.add(destination_stock)
+                db.session.flush()
+
+            destination_previous = Decimal(
+                str(destination_stock.quantity or "0")
+            )
+
+            # -----------------------------------------------
+            # CALCULATE NEW QUANTITIES
+            # -----------------------------------------------
+
+            source_new = source_previous - quantity
+            destination_new = destination_previous + quantity
+
+            # -----------------------------------------------
+            # UPDATE BOTH BRANCHES
+            # -----------------------------------------------
+
+            source_stock.quantity = source_new
+            destination_stock.quantity = destination_new
+
+            # -----------------------------------------------
+            # SAVE TRANSFER HISTORY
+            #
+            # Keep the source product ID in the transfer item.
+            # Product name is recorded for historical reference.
+            # -----------------------------------------------
+
+            transfer_item = StockTransferItem(
+                transfer_id=transfer.id,
+                product_id=source_product_id,
+                product_name=source_product.name,
+                quantity=quantity,
+                source_previous_stock=source_previous,
+                source_new_stock=source_new,
+                destination_previous_stock=destination_previous,
+                destination_new_stock=destination_new
+            )
+
+            db.session.add(transfer_item)
+
+            # -----------------------------------------------
+            # SOURCE MOVEMENT
+            # -----------------------------------------------
+
+            db.session.add(
+                StockMovement(
+                    cashier_id=None,
+                    admin_username=str(admin_username)[:100],
+                    movement_type="TRANSFER_OUT",
+                    product_id=source_product_id,
+                    product_name=source_product.name,
+                    branch_id=source_branch_id,
+                    previous_stock=source_previous,
+                    quantity_added=quantity,
+                    new_stock=source_new,
+                    reference=transfer.reference,
+                    notes=(
+                        f"Transferred to {destination_branch.name}. "
+                        f"Transfer reference: {transfer.reference}"
+                    )
+                )
+            )
+
+            # -----------------------------------------------
+            # DESTINATION MOVEMENT
+            #
+            # Uses the destination's actual product ID.
+            # -----------------------------------------------
+
+            db.session.add(
+                StockMovement(
+                    cashier_id=None,
+                    admin_username=str(admin_username)[:100],
+                    movement_type="TRANSFER_IN",
+                    product_id=destination_product_id,
+                    product_name=destination_product.name,
+                    branch_id=destination_branch_id,
+                    previous_stock=destination_previous,
+                    quantity_added=quantity,
+                    new_stock=destination_new,
+                    reference=transfer.reference,
+                    notes=(
+                        f"Received from {source_branch.name}. "
+                        f"Transfer reference: {transfer.reference}"
+                    )
+                )
+            )
+
+        # ----------------------------------------------------
+        # COMMIT EVERYTHING TOGETHER
+        # ----------------------------------------------------
+
+        db.session.commit()
+
+        return jsonify({
+            "status": "success",
+            "message": "Stock transfer completed successfully.",
+            "transfer": transfer.to_dict()
+        }), 201
+
+    except ValueError as error:
+
+        db.session.rollback()
+
+        return jsonify({
+            "status": "error",
+            "message": str(error)
+        }), 400
+
+    except IntegrityError:
+
+        db.session.rollback()
+
+        logger.exception(
+            "Stock transfer database integrity error."
+        )
+
+        return jsonify({
+            "status": "error",
+            "message": (
+                "The transfer could not be completed because "
+                "of a database constraint or concurrent stock update."
+            )
+        }), 409
+
+    except Exception:
+
+        db.session.rollback()
+
+        logger.exception(
+            "Failed to complete interbranch stock transfer."
+        )
+
+        return jsonify({
+            "status": "error",
+            "message": "Unable to complete stock transfer."
+        }), 500
