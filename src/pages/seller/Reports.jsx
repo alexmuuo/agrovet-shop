@@ -15,6 +15,8 @@ const [branchReports, setBranchReports] = useState([]);
 
 const [startDate, setStartDate] = useState("");
 const [endDate, setEndDate] = useState("");
+const [branches, setBranches] = useState([]);
+const [branchId, setBranchId] = useState("");
 
 const [loading, setLoading] = useState(true);
 const [error, setError] = useState("");
@@ -217,7 +219,23 @@ const params = {};
 if (startDate) params.start_date = startDate;
 if (endDate) params.end_date = endDate;
 
+// Website reports remain date-filtered only. Branch filtering applies
+// to POS reports because website orders are not branch POS transactions.
+const posParams = { ...params };
+if (branchId) posParams.branch_id = branchId;
+
 try {
+  try {
+    const branchRequest = await api.get("/admin/branches");
+    const branchData = extractData(branchRequest);
+    const branchList = Array.isArray(branchData)
+      ? branchData
+      : getArray(branchData, "branches", "items", "data");
+    setBranches(branchList);
+  } catch (branchError) {
+    console.error("Could not load report branch options:", branchError);
+  }
+
   const websiteRequests = await Promise.allSettled([
     api.get("/admin/reports/overview", { params }),
     api.get("/admin/reports/sales", { params }),
@@ -258,10 +276,10 @@ try {
   }
 
   const posRequests = await Promise.allSettled([
-    api.get("/admin/reports/pos/overview", { params }),
-    api.get("/admin/reports/pos/sales", { params }),
-    api.get("/admin/reports/pos/products", { params }),
-    api.get("/admin/reports/pos/branches", { params }),
+    api.get("/admin/reports/pos/overview", { params: posParams }),
+    api.get("/admin/reports/pos/sales", { params: posParams }),
+    api.get("/admin/reports/pos/products", { params: posParams }),
+    api.get("/admin/reports/pos/branches", { params: posParams }),
   ]);
 
   const posSetters = [
@@ -323,7 +341,7 @@ try {
 }
 
 
-}, [startDate, endDate]);
+}, [startDate, endDate, branchId]);
 
 useEffect(() => {
 loadReports();
@@ -331,7 +349,8 @@ loadReports();
 
 // =========================================================
 // EXPORT POS REPORTS TO EXCEL
-// Uses the selected date filters and exports cashier POS data only.
+// Uses the same date and branch filters as the POS dashboard.
+// Website orders are not included in this workbook.
 // =========================================================
 
 const exportPosReportsToExcel = async () => {
@@ -342,6 +361,7 @@ const exportPosReportsToExcel = async () => {
     const params = {};
     if (startDate) params.start_date = startDate;
     if (endDate) params.end_date = endDate;
+    if (branchId) params.branch_id = branchId;
 
     const response = await api.get("/admin/reports/pos/export.xlsx", {
       params,
@@ -355,9 +375,10 @@ const exportPosReportsToExcel = async () => {
     const downloadUrl = window.URL.createObjectURL(blob);
     const link = document.createElement("a");
     const datePart = new Date().toISOString().slice(0, 10);
+    const branchPart = branchId ? `_Branch_${branchId}` : "_All_Branches";
 
     link.href = downloadUrl;
-    link.download = `Headmaster_POS_Reports_${datePart}.xlsx`;
+    link.download = `Headmaster_POS_Reports${branchPart}_${datePart}.xlsx`;
     document.body.appendChild(link);
     link.click();
     link.remove();
@@ -368,14 +389,14 @@ const exportPosReportsToExcel = async () => {
       err?.message ||
       "Could not export the POS reports to Excel.";
 
-    // JSON error responses can arrive as a Blob when responseType is "blob".
+    // Axios may return a JSON error as a Blob because responseType is blob.
     if (err?.response?.data instanceof Blob) {
       try {
         const errorText = await err.response.data.text();
         const errorData = JSON.parse(errorText);
         message = errorData?.message || message;
       } catch {
-        // Keep the fallback message if the response is not JSON.
+        // Keep the fallback error message.
       }
     }
 
@@ -633,7 +654,7 @@ Reports & Analytics </h2>
         className="btn btn-outline-success"
         onClick={exportPosReportsToExcel}
         disabled={exportingExcel}
-        title="Export POS sales, items, payments, branch performance, and product performance to Excel"
+        title="Export POS reports using the selected date and branch filters"
       >
         <i
           className={`bi ${
@@ -664,7 +685,7 @@ Reports & Analytics </h2>
   <div className="card border-0 shadow-sm mb-4">
     <div className="card-body">
       <div className="row g-3 align-items-end">
-        <div className="col-12 col-md-4">
+        <div className="col-12 col-md-3">
           <label
             htmlFor="startDate"
             className="form-label fw-semibold"
@@ -684,7 +705,7 @@ Reports & Analytics </h2>
           />
         </div>
 
-        <div className="col-12 col-md-4">
+        <div className="col-12 col-md-3">
           <label
             htmlFor="endDate"
             className="form-label fw-semibold"
@@ -704,7 +725,35 @@ Reports & Analytics </h2>
           />
         </div>
 
-        <div className="col-12 col-md-4 d-flex gap-2">
+        <div className="col-12 col-md-3">
+          <label
+            htmlFor="reportBranch"
+            className="form-label fw-semibold"
+          >
+            POS branch
+          </label>
+          <select
+            id="reportBranch"
+            className="form-select"
+            value={branchId}
+            onChange={(event) => setBranchId(event.target.value)}
+          >
+            <option value="">All branches</option>
+            {branches.map((branch) => (
+              <option
+                key={branch.id ?? branch.branch_id}
+                value={branch.id ?? branch.branch_id}
+              >
+                {branch.name ?? branch.branch_name ?? `Branch ${branch.id ?? branch.branch_id}`}
+              </option>
+            ))}
+          </select>
+          <small className="text-muted">
+            Applies to POS and branch reports only.
+          </small>
+        </div>
+
+        <div className="col-12 col-md-3 d-flex gap-2">
           <button
             type="button"
             className="btn btn-success flex-grow-1"
@@ -721,9 +770,10 @@ Reports & Analytics </h2>
             onClick={() => {
               setStartDate("");
               setEndDate("");
+              setBranchId("");
             }}
-            title="Clear date filters"
-            aria-label="Clear date filters"
+            title="Clear all report filters"
+            aria-label="Clear all report filters"
           >
             <i className="bi bi-x-lg"></i>
           </button>
@@ -1409,7 +1459,8 @@ Reports & Analytics </h2>
       <div className="alert alert-info">
         <i className="bi bi-shop me-2"></i>
         POS reports use cashier sales records. They do not use
-        website orders or website order items.
+        website orders or website order items. The branch filter above
+        applies to these POS figures; website reports remain separate.
       </div>
 
       <div className="row g-3 mb-4">
