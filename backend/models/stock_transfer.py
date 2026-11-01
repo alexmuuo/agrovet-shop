@@ -61,6 +61,10 @@ class StockTransfer(db.Model):
         index=True
     )
 
+    # --------------------------------------------------------
+    # BRANCH RELATIONSHIPS
+    # --------------------------------------------------------
+
     source_branch = db.relationship(
         "Branch",
         foreign_keys=[source_branch_id]
@@ -71,12 +75,20 @@ class StockTransfer(db.Model):
         foreign_keys=[destination_branch_id]
     )
 
+    # --------------------------------------------------------
+    # TRANSFER ITEMS
+    # --------------------------------------------------------
+
     items = db.relationship(
         "StockTransferItem",
         back_populates="transfer",
         cascade="all, delete-orphan",
         lazy="selectin"
     )
+
+    # --------------------------------------------------------
+    # DATABASE CONSTRAINTS
+    # --------------------------------------------------------
 
     __table_args__ = (
         db.CheckConstraint(
@@ -90,27 +102,36 @@ class StockTransfer(db.Model):
         ),
     )
 
+    # --------------------------------------------------------
+    # SERIALIZATION
+    # --------------------------------------------------------
+
     def to_dict(self):
         return {
             "id": self.id,
             "reference": self.reference,
+
             "source_branch_id": self.source_branch_id,
             "source_branch_name": (
                 self.source_branch.name
                 if self.source_branch else None
             ),
+
             "destination_branch_id": self.destination_branch_id,
             "destination_branch_name": (
                 self.destination_branch.name
                 if self.destination_branch else None
             ),
+
             "status": self.status,
             "admin_username": self.admin_username,
             "notes": self.notes,
+
             "created_at": (
                 self.created_at.isoformat()
                 if self.created_at else None
             ),
+
             "items": [
                 item.to_dict()
                 for item in self.items
@@ -137,7 +158,10 @@ class StockTransferItem(db.Model):
         index=True
     )
 
-    # Product ID in the source branch.
+    # --------------------------------------------------------
+    # SOURCE PRODUCT
+    # --------------------------------------------------------
+
     product_id = db.Column(
         db.Integer,
         db.ForeignKey("products.id"),
@@ -145,8 +169,10 @@ class StockTransferItem(db.Model):
         index=True
     )
 
-    # Corresponding product ID in the destination branch.
-    # Nullable to preserve existing historical records.
+    # --------------------------------------------------------
+    # DESTINATION PRODUCT
+    # --------------------------------------------------------
+
     destination_product_id = db.Column(
         db.Integer,
         db.ForeignKey("products.id"),
@@ -154,15 +180,24 @@ class StockTransferItem(db.Model):
         index=True
     )
 
+    # Original/source product name.
     product_name = db.Column(
         db.String(255),
         nullable=False
     )
 
+    # --------------------------------------------------------
+    # TRANSFER QUANTITY
+    # --------------------------------------------------------
+
     quantity = db.Column(
         db.Numeric(12, 3),
         nullable=False
     )
+
+    # --------------------------------------------------------
+    # SOURCE BRANCH STOCK
+    # --------------------------------------------------------
 
     source_previous_stock = db.Column(
         db.Numeric(12, 3),
@@ -174,6 +209,10 @@ class StockTransferItem(db.Model):
         nullable=False
     )
 
+    # --------------------------------------------------------
+    # DESTINATION BRANCH STOCK
+    # --------------------------------------------------------
+
     destination_previous_stock = db.Column(
         db.Numeric(12, 3),
         nullable=False
@@ -183,6 +222,10 @@ class StockTransferItem(db.Model):
         db.Numeric(12, 3),
         nullable=False
     )
+
+    # --------------------------------------------------------
+    # RELATIONSHIPS
+    # --------------------------------------------------------
 
     transfer = db.relationship(
         "StockTransfer",
@@ -198,6 +241,10 @@ class StockTransferItem(db.Model):
         "Product",
         foreign_keys=[destination_product_id]
     )
+
+    # --------------------------------------------------------
+    # DATABASE CONSTRAINTS
+    # --------------------------------------------------------
 
     __table_args__ = (
         db.UniqueConstraint(
@@ -222,22 +269,51 @@ class StockTransferItem(db.Model):
         ),
     )
 
+    # --------------------------------------------------------
+    # SERIALIZATION
+    # --------------------------------------------------------
+
     def to_dict(self):
+
+        source_name = (
+            self.product.name
+            if self.product else self.product_name
+        )
+
+        destination_name = (
+            self.destination_product.name
+            if self.destination_product else None
+        )
+
         return {
             "id": self.id,
+
+            # Source product
             "product_id": self.product_id,
-            "destination_product_id": self.destination_product_id,
             "product_name": self.product_name,
+            "source_product_name": source_name,
+
+            # Destination product
+            "destination_product_id": self.destination_product_id,
+            "destination_product_name": destination_name,
+
+            # Quantity
             "quantity": float(self.quantity),
+
+            # Source stock
             "source_previous_stock": float(
                 self.source_previous_stock
             ),
+
             "source_new_stock": float(
                 self.source_new_stock
             ),
+
+            # Destination stock
             "destination_previous_stock": float(
                 self.destination_previous_stock
             ),
+
             "destination_new_stock": float(
                 self.destination_new_stock
             )
