@@ -137,10 +137,20 @@ class StockTransferItem(db.Model):
         index=True
     )
 
+    # Product ID in the source branch.
     product_id = db.Column(
         db.Integer,
         db.ForeignKey("products.id"),
         nullable=False,
+        index=True
+    )
+
+    # Corresponding product ID in the destination branch.
+    # Nullable to preserve existing historical records.
+    destination_product_id = db.Column(
+        db.Integer,
+        db.ForeignKey("products.id"),
+        nullable=True,
         index=True
     )
 
@@ -179,7 +189,15 @@ class StockTransferItem(db.Model):
         back_populates="items"
     )
 
-    product = db.relationship("Product")
+    product = db.relationship(
+        "Product",
+        foreign_keys=[product_id]
+    )
+
+    destination_product = db.relationship(
+        "Product",
+        foreign_keys=[destination_product_id]
+    )
 
     __table_args__ = (
         db.UniqueConstraint(
@@ -208,6 +226,7 @@ class StockTransferItem(db.Model):
         return {
             "id": self.id,
             "product_id": self.product_id,
+            "destination_product_id": self.destination_product_id,
             "product_name": self.product_name,
             "quantity": float(self.quantity),
             "source_previous_stock": float(
