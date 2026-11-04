@@ -5239,8 +5239,6 @@ def create_stock_transfer():
     "/api/admin/stock-transfers",
     methods=["POST"]
 )
-@admin_required
-def create_stock_transfer():
 
     try:
         data = request.get_json(silent=True) or {}
