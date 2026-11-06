@@ -1,139 +1,97 @@
-  cartItemPrice: {
-    color: "#166534",
-    fontWeight: "600",
-    fontSize: "13px",
-  },
-  smallLabel: {
-    color: "#64748b",
-    fontSize: "12px",
-    fontWeight: "600",
-  },
-  unitSelect: {
-    width: "100%",
-    padding: "9px",
-    border: "1px solid #cbd5e1",
-    borderRadius: "7px",
-    background: "#fff",
-    boxSizing: "border-box",
-  },
-  stockConsumption: {
-    color: "#64748b",
-    fontSize: "12px",
-  },
-  quantityControls: {
-    display: "flex",
-    alignItems: "center",
-    gap: "8px",
-    flexWrap: "wrap",
-  },
-  quantityButton: {
-    width: "32px",
-    height: "32px",
-    border: "1px solid #cbd5e1",
-    borderRadius: "6px",
-    background: "#fff",
-    cursor: "pointer",
-    fontSize: "18px",
-  },
-  quantityInput: {
-    width: "80px",
-    minWidth: 0,
-    padding: "7px 4px",
-    border: "1px solid #cbd5e1",
-    borderRadius: "6px",
-    textAlign: "center",
-    boxSizing: "border-box",
-  },
-  removeButton: {
-    marginLeft: "auto",
-    border: "none",
-    background: "transparent",
-    color: "#dc2626",
-    cursor: "pointer",
-  },
-  summary: {
-    marginTop: "24px",
-    paddingTop: "18px",
-    borderTop: "1px solid #e2e8f0",
-  },
-  paymentLabel: {
-    display: "block",
-    marginBottom: "8px",
-    fontWeight: "600",
-  },
-  paymentSelect: {
-    width: "100%",
-    padding: "12px",
-    marginBottom: "20px",
-    border: "1px solid #cbd5e1",
-    borderRadius: "8px",
-    background: "#fff",
-    fontSize: "14px",
-    boxSizing: "border-box",
-  },
-  phoneSection: {
-    marginBottom: "20px",
-  },
-  phoneInput: {
-    width: "100%",
-    padding: "12px",
-    border: "1px solid #cbd5e1",
-    borderRadius: "8px",
-    fontSize: "15px",
-    boxSizing: "border-box",
-  },
-  phoneHint: {
-    color: "#64748b",
-    fontSize: "12px",
-    lineHeight: 1.5,
-    marginBottom: 0,
-  },
-  summaryRow: {
-    display: "flex",
-    justifyContent: "space-between",
-    gap: "10px",
-    marginBottom: "16px",
-    color: "#64748b",
-  },
-  totalRow: {
-    display: "flex",
-    justifyContent: "space-between",
-    gap: "10px",
-    marginBottom: "22px",
-    fontSize: "19px",
-  },
-  checkoutButton: {
-    width: "100%",
-    padding: "14px",
-    border: "none",
-    borderRadius: "8px",
-    background: "#166534",
-    color: "#fff",
-    fontSize: "15px",
-    fontWeight: "700",
-    cursor: "pointer",
-  },
-  clearButton: {
-    width: "100%",
-    marginTop: "10px",
-    padding: "11px",
-    border: "1px solid #fecaca",
-    borderRadius: "8px",
-    background: "#fff",
-    color: "#b91c1c",
-    cursor: "pointer",
-  },
-  disabledClearButton: {
-    opacity: 0.5,
-    cursor: "not-allowed",
-  },
-  notice: {
-    marginTop: "14px",
-    color: "#64748b",
-    fontSize: "12px",
-    lineHeight: 1.5,
-    textAlign: "center",
-  },
-};
 
-export default CashierPOS;
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+
+import { useNavigate } from "react-router-dom";
+import api from "../../api/api";
+
+const DECIMAL_PLACES = 3;
+
+function toNumber(value, fallback = 0) {
+  if (value === null || value === undefined || value === "") {
+    return fallback;
+  }
+
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
+}
+
+function roundStock(value) {
+  return Number(Number(value).toFixed(DECIMAL_PLACES));
+}
+
+function CashierPOS() {
+  const navigate = useNavigate();
+
+  const [products, setProducts] = useState([]);
+  const [cart, setCart] = useState([]);
+  const [search, setSearch] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [checkoutLoading, setCheckoutLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [message, setMessage] = useState("");
+  const [paymentMethod, setPaymentMethod] = useState("cash");
+  const [mpesaPhone, setMpesaPhone] = useState("");
+  const [receipt, setReceipt] = useState(null);
+  const [cartOpen, setCartOpen] = useState(false);
+
+  const pollingRef = useRef(false);
+  const pollingSaleRef = useRef(null);
+  const mountedRef = useRef(false);
+
+  const cashier = useMemo(() => {
+    try {
+      return JSON.parse(localStorage.getItem("cashier") || "null");
+    } catch {
+      return null;
+    }
+  }, []);
+
+  // ============================================================
+  // LIFECYCLE
+  // ============================================================
+
+  useEffect(() => {
+    mountedRef.current = true;
+
+    return () => {
+      mountedRef.current = false;
+      pollingRef.current = false;
+    };
+  }, []);
+
+  // ============================================================
+  // LOAD PRODUCTS FOR THE AUTHENTICATED CASHIER'S BRANCH
+  // ============================================================
+
+  const fetchProducts = useCallback(async () => {
+    const response = await api.get("/cashier/stock/products");
+    const data = response.data;
+
+    const productList = Array.isArray(data)
+      ? data
+      : Array.isArray(data?.products)
+        ? data.products
+        : Array.isArray(data?.items)
+          ? data.items
+          : null;
+
+    if (!productList) {
+      throw new Error(
+        "The branch stock API returned an unexpected response."
+      );
+    }
+
+    const normalizedProducts = productList.map((product) => {
+      const branchQuantity =
+        product.branch_stock ??
+        product.quantity ??
+        product.stock_quantity ??
+        product.quantity_in_stock ??
+        product.stock ??
+        null;
