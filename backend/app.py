@@ -150,6 +150,7 @@ from models.branch_product_stock import BranchProductStock
 from models.cashier_sale import CashierSale, CashierSaleItem
 from models.cashier_sale_payment import CashierSalePayment
 from models.cashier_sale_audit import CashierSaleAudit
+from models.stock_batch import StockBatch
 
 
 # --------------------------------------------------
@@ -167,6 +168,9 @@ from routes.payment_routes import payment_bp
 from routes.cashier_routes import cashier_bp
 from routes.cashier_sales import cashier_sales_bp
 from routes.admin_pos_sales import admin_pos_sales_bp
+from routes.cashier_stock_receiving import (
+    cashier_stock_receiving_bp
+)
 
 # --------------------------------------------------
 # REGISTER ROUTES
@@ -183,6 +187,7 @@ app.register_blueprint(payment_bp)
 app.register_blueprint(cashier_bp)
 app.register_blueprint(cashier_sales_bp)
 app.register_blueprint(admin_pos_sales_bp)
+app.register_blueprint(cashier_stock_receiving_bp)
 
 # --------------------------------------------------
 # PUBLIC HEALTH CHECK
