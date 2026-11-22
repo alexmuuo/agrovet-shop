@@ -17,6 +17,11 @@ from models.branch import Branch
 from models.branch_product_stock import BranchProductStock
 from models.product import Product
 
+from services.stock_batch_admin_service import (
+    restore_sale_item_batches,
+    sale_items_have_batch_allocations,
+)
+
 
 # ============================================================
 # BLUEPRINT AND CONFIGURATION
@@ -263,13 +268,41 @@ def sale_snapshot(sale):
                 else None
             ),
             "quantity": float(quantity),
+            "sale_quantity": json_number(
+                getattr(item, "sale_quantity", None)
+            ),
+            "selling_unit": getattr(item, "selling_unit", None),
             "price": json_money(unit_price),
             "buying_price": (
                 json_money(item.buying_price)
                 if item.buying_price is not None
                 else None
             ),
-            "subtotal": json_money(unit_price * quantity),
+            "subtotal": json_money(
+                unit_price * decimal_value(
+                    getattr(item, "sale_quantity", None),
+                    str(quantity),
+                )
+            ),
+            "batch_allocations": [
+                {
+                    "id": allocation.id,
+                    "batch_id": allocation.batch_id,
+                    "quantity": json_number(allocation.quantity),
+                    "buying_price": json_money(allocation.buying_price),
+                    "selling_price": json_money(allocation.selling_price),
+                    "revenue": json_money(allocation.revenue),
+                    "cost": json_money(allocation.cost),
+                    "gross_profit": json_money(allocation.gross_profit),
+                    "is_restored": bool(allocation.is_restored),
+                    "restored_at": (
+                        allocation.restored_at.isoformat()
+                        if allocation.restored_at is not None
+                        else None
+                    ),
+                }
+                for allocation in getattr(item, "batch_allocations", [])
+            ],
         })
 
     payments = []
@@ -792,6 +825,18 @@ def edit_pos_sale(sale_id):
 
         # Original item quantities.
         original_items = list(sale.items)
+
+        # Replacing allocated sale items would destroy their original
+        # batch links and corrupt historical BP/SP and COGS.
+        # Reject edits until a batch-aware edit workflow is implemented.
+        if sale_items_have_batch_allocations(original_items):
+            return error_response(
+                "This sale has stock batch allocations and cannot be "
+                "edited through the current administrative workflow. "
+                "Its batch and financial history must be preserved.",
+                409,
+            )
+
         old_quantities = {}
 
         for item in original_items:
@@ -1135,6 +1180,27 @@ def void_pos_sale(sale_id):
                 409,
             )
 
+        # Restore the exact original batches and mark their allocations
+        # restored. This service does not commit independently.
+        try:
+            batch_restore = restore_sale_item_batches(
+                list(sale.items),
+                restoration_reference=f"VOID-{sale.sale_number}",
+            )
+        except ValueError as exc:
+            db.session.rollback()
+            return error_response(str(exc), 409)
+
+        if not batch_restore.get("restored"):
+            db.session.rollback()
+            return error_response(
+                batch_restore.get(
+                    "message",
+                    "Original stock batches could not be restored.",
+                ),
+                409,
+            )
+
         # Restore branch stock.
         for product_id in product_ids:
             stock = stock_by_product[product_id]
@@ -1144,7 +1210,7 @@ def void_pos_sale(sale_id):
                 + old_quantities[product_id]
             )
 
-              # Mark the sale as voided.
+        # Mark the sale as voided.
         sale.status = "voided"
 
         # Automatically void successful payment records.
@@ -1189,6 +1255,13 @@ def void_pos_sale(sale_id):
     "marked as voided. "
 ),
             "sale": sale_snapshot(sale),
+            "batch_restoration": {
+                "allocation_count": batch_restore["allocation_count"],
+                "restored_quantity": json_number(
+                    batch_restore["restored_quantity"]
+                ),
+                "message": batch_restore["message"],
+            },
             "refund_required_review": has_successful_payment,
             "payment_notice": (
     "Successful payment records were marked as voided for "
@@ -1228,4 +1301,3 @@ def void_pos_sale(sale_id):
             "Unable to void the POS sale. No changes were saved.",
             500,
         )
-
