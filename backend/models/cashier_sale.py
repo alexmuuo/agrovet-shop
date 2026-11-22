@@ -67,7 +67,6 @@ class CashierSale(db.Model):
         index=True
     )
 
-    # Relationships
     branch = db.relationship(
         "Branch",
         back_populates="sales"
@@ -90,6 +89,7 @@ class CashierSale(db.Model):
     )
 
     def to_dict(self):
+
         total = (
             Decimal(str(self.total))
             if self.total is not None
@@ -101,6 +101,7 @@ class CashierSale(db.Model):
             "sale_number": self.sale_number,
 
             "branch_id": self.branch_id,
+
             "branch_name": (
                 self.branch.name
                 if self.branch
@@ -108,6 +109,7 @@ class CashierSale(db.Model):
             ),
 
             "cashier_id": self.cashier_id,
+
             "cashier_name": (
                 self.cashier.full_name
                 if self.cashier
@@ -134,6 +136,7 @@ class CashierSale(db.Model):
 
 
 class CashierSaleItem(db.Model):
+
     __tablename__ = "cashier_sale_items"
 
     id = db.Column(
@@ -161,48 +164,36 @@ class CashierSaleItem(db.Model):
         index=True
     )
 
-    # Stock consumed, expressed in whole-stock-unit equivalents.
-    #
-    # Example:
-    # A bottle sold in 2 portions, with 4 portions per bottle,
-    # consumes 2 / 4 = 0.500 bottles.
+    # Stock-equivalent quantity consumed.
     quantity = db.Column(
         db.Numeric(12, 3),
         nullable=False
     )
 
-    # Quantity actually sold to the customer.
-    #
-    # Example:
-    # 2 portions means sale_quantity = 2.000,
-    # while quantity = 0.500 bottles.
+    # Actual quantity sold.
     sale_quantity = db.Column(
         db.Numeric(12, 3),
         nullable=False
     )
 
-    # Examples: "unit", "bottle", "portion".
     selling_unit = db.Column(
         db.String(50),
         nullable=False
     )
 
-    # Price per selling unit, not necessarily per stock unit.
-    #
-    # Whole bottle: KSh 350 per bottle.
-    # Portion: KSh 90 per portion.
+    # Selling price per selling unit.
     price = db.Column(
         db.Numeric(10, 2),
         nullable=False
     )
 
-    # Cost per whole stock unit, captured at the time of sale.
+    # Historical BP per whole stock unit.
+    # Retained for compatibility with existing sales.
     buying_price = db.Column(
         db.Numeric(10, 2),
         nullable=True
     )
 
-    # Relationships
     sale = db.relationship(
         "CashierSale",
         back_populates="items"
@@ -212,7 +203,11 @@ class CashierSaleItem(db.Model):
         "Product"
     )
 
+    # StockBatchAllocation creates the batch_allocations
+    # relationship through its sale_item relationship.
+
     __table_args__ = (
+
         db.CheckConstraint(
             "quantity > 0",
             name="ck_cashier_sale_item_quantity_positive"
@@ -235,8 +230,7 @@ class CashierSaleItem(db.Model):
     )
 
     def to_dict(self):
-        # Decimal conversion avoids floating-point arithmetic
-        # errors in financial calculations.
+
         stock_quantity = (
             Decimal(str(self.quantity))
             if self.quantity is not None
@@ -261,40 +255,73 @@ class CashierSaleItem(db.Model):
             else None
         )
 
-        # Revenue is based on the quantity sold, not the
-        # stock-equivalent quantity consumed.
-        subtotal = price * sale_quantity
-
-        # Cost is based on the actual amount of stock consumed.
-        cost_of_goods_sold = (
-            buying_price * stock_quantity
-            if buying_price is not None
-            else None
+        subtotal = (
+            price * sale_quantity
         )
 
-        # Gross profit = revenue - cost of stock consumed.
-        gross_profit = (
-            subtotal - cost_of_goods_sold
-            if cost_of_goods_sold is not None
-            else None
-        )
+        # New calculation: use actual batch allocations.
+        allocations = getattr(
+            self,
+            "batch_allocations",
+            []
+        ) or []
+
+        if allocations:
+
+            cost_of_goods_sold = sum(
+                (
+                    Decimal(str(allocation.cost))
+                    for allocation in allocations
+                ),
+                ZERO
+            )
+
+            allocated_revenue = sum(
+                (
+                    Decimal(str(allocation.revenue))
+                    for allocation in allocations
+                ),
+                ZERO
+            )
+
+            gross_profit = (
+                allocated_revenue - cost_of_goods_sold
+            )
+
+        else:
+
+            # Backward compatibility for historical sales
+            # that were created before batch tracking.
+            cost_of_goods_sold = (
+                buying_price * stock_quantity
+                if buying_price is not None
+                else None
+            )
+
+            gross_profit = (
+                subtotal - cost_of_goods_sold
+                if cost_of_goods_sold is not None
+                else None
+            )
 
         return {
+
             "id": self.id,
+
             "sale_id": self.sale_id,
 
             "product_id": self.product_id,
+
             "product_name": (
                 self.product.name
                 if self.product
                 else None
             ),
 
-            # Backward-compatible field: quantity remains
-            # the stock-equivalent quantity consumed.
             "quantity": float(stock_quantity),
 
             "sale_quantity": float(sale_quantity),
+
             "selling_unit": self.selling_unit,
 
             "price": float(price),
@@ -317,5 +344,13 @@ class CashierSaleItem(db.Model):
                 float(gross_profit)
                 if gross_profit is not None
                 else None
-            )
+            ),
+
+            # New batch-level information.
+            "batch_allocations": [
+                allocation.to_dict()
+                for allocation in allocations
+            ],
+
+            "batch_count": len(allocations)
         }
