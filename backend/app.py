@@ -151,7 +151,7 @@ from models.cashier_sale import CashierSale, CashierSaleItem
 from models.cashier_sale_payment import CashierSalePayment
 from models.cashier_sale_audit import CashierSaleAudit
 from models.stock_batch import StockBatch
-
+from models.stock_batch_allocation import StockBatchAllocation
 
 # --------------------------------------------------
 # IMPORT ROUTES
