@@ -12,13 +12,11 @@ const [posOverview, setPosOverview] = useState(null);
 const [posSales, setPosSales] = useState(null);
 const [posProducts, setPosProducts] = useState(null);
 const [branchReports, setBranchReports] = useState([]);
+const [stockTransfers, setStockTransfers] = useState([]);
+const [branchId, setBranchId] = useState("");
 
 const [startDate, setStartDate] = useState("");
 const [endDate, setEndDate] = useState("");
-const [branches, setBranches] = useState([]);
-const [selectedBranchId, setSelectedBranchId] = useState("");
-const [branchesLoading, setBranchesLoading] = useState(true);
-const [branchLoadError, setBranchLoadError] = useState("");
 
 const [loading, setLoading] = useState(true);
 const [error, setError] = useState("");
@@ -206,61 +204,8 @@ item?.id ??
 "—";
 
 // =========================================================
-// LOAD BRANCHES FOR THE POS REPORT FILTER
-// =========================================================
-
-useEffect(() => {
-  let cancelled = false;
-
-  const loadBranches = async () => {
-    setBranchesLoading(true);
-    setBranchLoadError("");
-
-    try {
-      const response = await api.get("/admin/branches");
-      const data = response?.data;
-
-      if (data?.status === "error") {
-        throw new Error(data.message || "Unable to load branches.");
-      }
-
-      const branchRows = Array.isArray(data)
-        ? data
-        : Array.isArray(data?.branches)
-          ? data.branches
-          : [];
-
-      if (!cancelled) {
-        setBranches(branchRows);
-      }
-    } catch (err) {
-      console.error("Failed to load report branches:", err);
-
-      if (!cancelled) {
-        setBranchLoadError(
-          err?.response?.data?.message ||
-          err?.message ||
-          "Unable to load branches."
-        );
-      }
-    } finally {
-      if (!cancelled) {
-        setBranchesLoading(false);
-      }
-    }
-  };
-
-  loadBranches();
-
-  return () => {
-    cancelled = true;
-  };
-}, []);
-
-// =========================================================
 // LOAD REPORTS
-// Website reports remain global.
-// Every POS report request receives the selected branch_id.
+// Website and POS requests remain separate.
 // =========================================================
 
 const loadReports = useCallback(async () => {
@@ -273,13 +218,6 @@ const params = {};
 
 if (startDate) params.start_date = startDate;
 if (endDate) params.end_date = endDate;
-
-const posParams = {
-  ...params,
-  ...(selectedBranchId
-    ? { branch_id: Number(selectedBranchId) }
-    : {}),
-};
 
 try {
   const websiteRequests = await Promise.allSettled([
@@ -321,11 +259,17 @@ try {
     setError(websiteErrors[0]);
   }
 
+  const posParams = { ...params };
+  if (branchId) posParams.branch_id = branchId;
+
   const posRequests = await Promise.allSettled([
     api.get("/admin/reports/pos/overview", { params: posParams }),
     api.get("/admin/reports/pos/sales", { params: posParams }),
     api.get("/admin/reports/pos/products", { params: posParams }),
-    api.get("/admin/reports/pos/branches", { params: posParams }),
+    api.get("/admin/reports/pos/branches", { params }),
+    api.get("/admin/stock-transfers", {
+      params: branchId ? { branch_id: branchId, limit: 500 } : { limit: 500 },
+    }),
   ]);
 
   const posSetters = [
@@ -333,6 +277,7 @@ try {
     setPosSales,
     setPosProducts,
     setBranchReports,
+    setStockTransfers,
   ];
 
   const posErrors = [];
@@ -346,13 +291,10 @@ try {
           posSetters[index](
             Array.isArray(data)
               ? data
-              : getArray(
-                  data,
-                  "branches",
-                  "reports",
-                  "items"
-                )
+              : getArray(data, "branches", "reports", "items")
           );
+        } else if (index === 4) {
+          posSetters[index](getArray(data, "transfers", "items"));
         } else {
           posSetters[index](data);
         }
@@ -387,16 +329,15 @@ try {
 }
 
 
-}, [startDate, endDate, selectedBranchId]);
+}, [startDate, endDate, branchId]);
 
 useEffect(() => {
 loadReports();
 }, [loadReports]);
 
 // =========================================================
-// EXPORT ALL POS REPORTS TO EXCEL
-// Uses the same date filters as the report dashboard.
-// This export contains cashier POS records, not website orders.
+// EXPORT POS REPORTS TO EXCEL
+// Uses the selected date filters and exports cashier POS data only.
 // =========================================================
 
 const exportPosReportsToExcel = async () => {
@@ -407,39 +348,23 @@ const exportPosReportsToExcel = async () => {
     const params = {};
     if (startDate) params.start_date = startDate;
     if (endDate) params.end_date = endDate;
-    if (selectedBranchId) {
-      params.branch_id = Number(selectedBranchId);
-    }
+    if (branchId) params.branch_id = branchId;
 
-    const response = await api.get(
-      "/admin/reports/pos/export.xlsx",
-      {
-        params,
-        responseType: "blob",
-      }
-    );
+    const response = await api.get("/admin/reports/pos/export.xlsx", {
+      params,
+      responseType: "blob",
+    });
 
-    const blob = new Blob(
-      [response.data],
-      {
-        type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-      }
-    );
+    const blob = new Blob([response.data], {
+      type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    });
 
     const downloadUrl = window.URL.createObjectURL(blob);
     const link = document.createElement("a");
     const datePart = new Date().toISOString().slice(0, 10);
 
-    const selectedBranch = branches.find(
-      (branch) => String(branch.id) === String(selectedBranchId)
-    );
-    const branchFileName = selectedBranchId
-      ? (selectedBranch?.name || `Branch_${selectedBranchId}`)
-          .replace(/[^a-z0-9_-]+/gi, "_")
-      : "All_Branches";
-
     link.href = downloadUrl;
-    link.download = `Headmaster_POS_Reports_${branchFileName}_${datePart}.xlsx`;
+    link.download = `Agrovet_POS_Reports_${datePart}.xlsx`;
     document.body.appendChild(link);
     link.click();
     link.remove();
@@ -450,14 +375,14 @@ const exportPosReportsToExcel = async () => {
       err?.message ||
       "Could not export the POS reports to Excel.";
 
-    // With responseType='blob', a JSON error response may also arrive as a Blob.
+    // JSON error responses can arrive as a Blob when responseType is "blob".
     if (err?.response?.data instanceof Blob) {
       try {
         const errorText = await err.response.data.text();
         const errorData = JSON.parse(errorText);
         message = errorData?.message || message;
       } catch {
-        // Keep the useful fallback message if the response was not JSON.
+        // Keep the fallback message if the response is not JSON.
       }
     }
 
@@ -545,27 +470,30 @@ posProductsData,
 );
 
 const posTransactionList = getArray(
-posSalesData,
+posSales,
 "transactions",
 "sales_records",
 "sale_records"
 );
 
 const posRevenue = Number(
-getValue(
-posOverviewData,
-"total_sales",
-"total_revenue",
-"sales_total"
-)
+  getValue(
+    posOverviewData,
+    "sales_revenue",
+    "total_revenue",
+    "total_sales_revenue",
+    "sales_total",
+    "total_sales"
+  )
 );
 
 const posCost = getOptionalValue(
-posOverviewData,
-"total_cost",
-"total_buying_cost",
-"cost_of_goods",
-"total_cost_of_goods"
+  posOverviewData,
+  "total_cost",
+  "total_buying_cost",
+  "cost_of_goods",
+  "cost_of_goods_sold",
+  "total_cost_of_goods"
 );
 
 const posGrossProfit = getOptionalValue(
@@ -582,10 +510,11 @@ posOverviewData,
 );
 
 const posUnknownCostSales = getValue(
-posOverviewData,
-"unknown_cost_sales",
-"sales_with_unknown_cost",
-"unaccounted_cost_sales"
+  posOverviewData,
+  "unknown_cost_sales_value",
+  "unknown_cost_sales",
+  "sales_with_unknown_cost",
+  "unaccounted_cost_sales"
 );
 
 // =========================================================
@@ -737,12 +666,12 @@ Reports & Analytics </h2>
     </div>
   </div>
 
-  {/* REPORT FILTERS */}
+  {/* DATE FILTERS */}
 
   <div className="card border-0 shadow-sm mb-4">
     <div className="card-body">
       <div className="row g-3 align-items-end">
-        <div className="col-12 col-md-3">
+        <div className="col-12 col-md-4">
           <label
             htmlFor="startDate"
             className="form-label fw-semibold"
@@ -756,11 +685,13 @@ Reports & Analytics </h2>
             className="form-control"
             value={startDate}
             max={endDate || undefined}
-            onChange={(event) => setStartDate(event.target.value)}
+            onChange={(event) =>
+              setStartDate(event.target.value)
+            }
           />
         </div>
 
-        <div className="col-12 col-md-3">
+        <div className="col-12 col-md-4">
           <label
             htmlFor="endDate"
             className="form-label fw-semibold"
@@ -774,47 +705,13 @@ Reports & Analytics </h2>
             className="form-control"
             value={endDate}
             min={startDate || undefined}
-            onChange={(event) => setEndDate(event.target.value)}
+            onChange={(event) =>
+              setEndDate(event.target.value)
+            }
           />
         </div>
 
-        <div className="col-12 col-md-3">
-          <label
-            htmlFor="reportBranch"
-            className="form-label fw-semibold"
-          >
-            POS Branch
-          </label>
-
-          <select
-            id="reportBranch"
-            className="form-select"
-            value={selectedBranchId}
-            disabled={branchesLoading}
-            onChange={(event) => setSelectedBranchId(event.target.value)}
-          >
-            <option value="">
-              {branchesLoading ? "Loading branches..." : "All Branches"}
-            </option>
-
-            {branches.map((branch) => (
-              <option key={branch.id} value={branch.id}>
-                {branch.name || `Branch ${branch.id}`}
-              </option>
-            ))}
-          </select>
-
-          {branchLoadError && (
-            <small className="text-danger d-block mt-1">
-              {branchLoadError}
-            </small>
-          )}
-          <small className="text-muted">
-            Applies to POS reports only.
-          </small>
-        </div>
-
-        <div className="col-12 col-md-3 d-flex gap-2">
+        <div className="col-12 col-md-4 d-flex gap-2">
           <button
             type="button"
             className="btn btn-success flex-grow-1"
@@ -822,7 +719,7 @@ Reports & Analytics </h2>
             disabled={loading}
           >
             <i className="bi bi-funnel me-1"></i>
-            Apply
+            Apply Filters
           </button>
 
           <button
@@ -831,13 +728,31 @@ Reports & Analytics </h2>
             onClick={() => {
               setStartDate("");
               setEndDate("");
-              setSelectedBranchId("");
             }}
-            title="Clear all report filters"
-            aria-label="Clear all report filters"
+            title="Clear date filters"
+            aria-label="Clear date filters"
           >
             <i className="bi bi-x-lg"></i>
           </button>
+        </div>
+      </div>
+      <div className="row mt-3">
+        <div className="col-12 col-md-6 col-lg-4">
+          <label htmlFor="posBranchFilter" className="form-label fw-semibold">POS branch filter</label>
+          <select
+            id="posBranchFilter"
+            className="form-select"
+            value={branchId}
+            onChange={(event) => setBranchId(event.target.value)}
+          >
+            <option value="">All branches</option>
+            {branchReports.map((branch, index) => (
+              <option key={branch.branch_id ?? branch.id ?? index} value={branch.branch_id ?? branch.id}>
+                {branch.branch_name ?? branch.name ?? `Branch ${index + 1}`}
+              </option>
+            ))}
+          </select>
+          <small className="text-muted">Applies to POS totals, products, transactions and Excel export. Website reports remain separate.</small>
         </div>
       </div>
     </div>
@@ -1461,7 +1376,8 @@ Reports & Analytics </h2>
               profitData,
               "total_cost",
               "total_buying_cost",
-              "cost_of_goods"
+              "cost_of_goods",
+              "cost_of_goods_sold"
             )
           )}
           icon="bi-box-seam"
@@ -1520,11 +1436,6 @@ Reports & Analytics </h2>
         <i className="bi bi-shop me-2"></i>
         POS reports use cashier sales records. They do not use
         website orders or website order items.
-        <strong className="ms-1">
-          {selectedBranchId
-            ? `Showing ${branches.find((branch) => String(branch.id) === String(selectedBranchId))?.name || `Branch ${selectedBranchId}`} only.`
-            : "Showing all branches combined."}
-        </strong>
       </div>
 
       <div className="row g-3 mb-4">
@@ -1543,6 +1454,7 @@ Reports & Analytics </h2>
               posOverviewData,
               "total_sales_count",
               "total_transactions",
+              "total_sales",
               "total_orders",
               "sales_count"
             )
@@ -1552,13 +1464,12 @@ Reports & Analytics </h2>
         />
 
         <StatCard
-          title="Paid POS Sales"
-          value={formatMoney(
+          title="Paid POS Transactions"
+          value={formatNumber(
             getValue(
               posOverviewData,
               "paid_sales",
-              "total_paid",
-              "paid_revenue"
+              "total_paid_transactions"
             )
           )}
           icon="bi-check-circle"
@@ -1567,13 +1478,13 @@ Reports & Analytics </h2>
         />
 
         <StatCard
-          title="Pending POS Payments"
-          value={formatMoney(
+          title="Pending POS Transactions"
+          value={formatNumber(
             getValue(
               posOverviewData,
-              "pending_payments",
-              "unpaid_sales",
-              "pending_amount"
+              "pending_payment_count",
+              "pending_transactions",
+              "unpaid_sales_count"
             )
           )}
           icon="bi-clock-history"
@@ -1776,7 +1687,9 @@ Reports & Analytics </h2>
                               item,
                               "total_sales_count",
                               "total_transactions",
+                              "transactions",
                               "sales_count",
+                              "sales",
                               "count"
                             )
                           )}
@@ -1788,6 +1701,7 @@ Reports & Analytics </h2>
                               item,
                               "total_sales",
                               "total_revenue",
+                              "sales_revenue",
                               "sales",
                               "revenue",
                               "total"
@@ -1852,7 +1766,8 @@ Reports & Analytics </h2>
                       product,
                       "total_cost",
                       "total_buying_cost",
-                      "cost_of_goods"
+                      "cost_of_goods",
+                      "cost_of_goods_sold"
                     );
 
                     const productProfit = getProfit(product);
@@ -1892,6 +1807,7 @@ Reports & Analytics </h2>
                               product,
                               "total_sales",
                               "total_value",
+                              "sales_revenue",
                               "revenue",
                               "subtotal"
                             )
@@ -1945,10 +1861,9 @@ Reports & Analytics </h2>
 
       <div className="alert alert-info">
         <i className="bi bi-diagram-3 me-2"></i>
-        {selectedBranchId
-          ? "Showing performance for the selected branch only."
-          : "Each branch is reported separately using its own POS sales records and branch stock workflow."}
-        Website orders are excluded.
+        Each branch is reported separately using its own POS
+        sales records and branch stock workflow. Website orders
+        are excluded.
       </div>
 
       <div className="card border-0 shadow-sm">
@@ -1965,7 +1880,7 @@ Reports & Analytics </h2>
                     <th>Branch</th>
                     <th>Transactions</th>
                     <th className="text-end">Sales (KES)</th>
-                    <th className="text-end">Paid Sales (KES)</th>
+                    <th className="text-end">Paid Transactions</th>
                     <th className="text-end">Cost of Goods</th>
                     <th className="text-end">Gross Profit</th>
                     <th className="text-end">Margin</th>
@@ -1978,7 +1893,8 @@ Reports & Analytics </h2>
                       branch,
                       "total_cost",
                       "total_buying_cost",
-                      "cost_of_goods"
+                      "cost_of_goods",
+                      "cost_of_goods_sold"
                     );
 
                     const branchProfit = getProfit(branch);
@@ -2016,18 +1932,19 @@ Reports & Analytics </h2>
                               branch,
                               "total_sales",
                               "total_revenue",
-                              "sales_total"
+                              "sales_total",
+                              "sales_revenue"
                             )
                           )}
                         </td>
 
                         <td className="text-end text-success">
-                          {formatMoney(
+                          {formatNumber(
                             getValue(
                               branch,
                               "paid_sales",
-                              "total_paid",
-                              "paid_revenue"
+                              "paid_transactions",
+                              "total_paid_transactions"
                             )
                           )}
                         </td>
@@ -2066,13 +1983,58 @@ Reports & Analytics </h2>
     </>
   )}
 
+  {/* STOCK TRANSFERS */}
+
+  {activeReport === "transfers" && (
+    <>
+      <div className="alert alert-info">
+        <i className="bi bi-info-circle me-2"></i>
+        Interbranch transfers are inventory movements, not sales. They change stock quantities and branch-level stock valuation, but must not add revenue, COGS or gross profit. Batch cost and selling-price history should be preserved by the backend transfer workflow.
+      </div>
+      <div className="row g-3 mb-4">
+        <StatCard title="Transfers listed" value={formatNumber(stockTransfers.length)} icon="bi-arrow-left-right" color="primary" subtitle="Up to 500 most recent transfers" />
+        <StatCard title="Units transferred" value={formatNumber(stockTransfers.reduce((sum, transfer) => sum + Number(transfer.total_quantity ?? transfer.quantity ?? (transfer.items || []).reduce((n, item) => n + Number(item.quantity || 0), 0)), 0))} icon="bi-box-seam" color="success" subtitle="Quantity across listed transfer records" />
+      </div>
+      <div className="card border-0 shadow-sm">
+        <div className="card-header bg-white py-3 d-flex flex-wrap justify-content-between gap-2">
+          <h5 className="fw-bold mb-0">Interbranch Transfer History</h5>
+          <small className="text-muted">Filtered by selected branch when applicable</small>
+        </div>
+        <div className="card-body">
+          {stockTransfers.length ? (
+            <div className="table-responsive">
+              <table className="table table-hover align-middle">
+                <thead className="table-light"><tr><th>Reference</th><th>Date</th><th>From</th><th>To</th><th>Products / quantities</th><th>Initiated by</th><th>Status</th></tr></thead>
+                <tbody>
+                  {stockTransfers.map((transfer, index) => (
+                    <tr key={transfer.id ?? transfer.reference ?? index}>
+                      <td className="fw-semibold">{transfer.reference ?? transfer.transfer_number ?? `Transfer #${transfer.id ?? index + 1}`}</td>
+                      <td>{formatDateTime(transfer.created_at ?? transfer.date)}</td>
+                      <td>{transfer.source_branch_name ?? transfer.source_branch?.name ?? transfer.source_branch ?? "—"}</td>
+                      <td>{transfer.destination_branch_name ?? transfer.destination_branch?.name ?? transfer.destination_branch ?? "—"}</td>
+                      <td><div className="small">{(transfer.items || []).map((item, itemIndex) => <div key={item.id ?? itemIndex}>{item.product_name ?? item.source_product_name ?? item.product?.name ?? "Product"}: <strong>{formatNumber(item.quantity)}</strong></div>)}</div></td>
+                      <td>{transfer.admin_username ?? transfer.initiated_by ?? transfer.created_by ?? "—"}</td>
+                      <td><span className="badge text-bg-success">{transfer.status ?? "Completed"}</span></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <EmptyState icon="bi-arrow-left-right" message="No interbranch transfers were returned for this selection." />
+          )}
+        </div>
+      </div>
+    </>
+  )}
+
   {/* FOOTER */}
 
   <div className="alert alert-light border mt-4 mb-0">
     <i className="bi bi-info-circle text-success me-2"></i>
     <strong>Reporting note:</strong> Website reports use website
     orders. POS and branch reports use separate cashier sales
-    records. Recorded sales are not automatically treated as
+    records. Interbranch transfers affect inventory movement and stock valuation only; they are not sales. Recorded sales are not automatically treated as
     confirmed payments. Profit figures depend on historical
     buying prices recorded against the sold items.
   </div>
