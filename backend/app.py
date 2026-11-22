@@ -39,7 +39,6 @@ if not DATABASE_URL:
         "Check the backend .env file or server environment variables."
     )
 
-# Normalize older PostgreSQL URL formats.
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace(
         "postgres://",
@@ -69,7 +68,6 @@ app.config["MAIL_USE_TLS"] = (
 )
 
 app.config["MAIL_USE_SSL"] = False
-
 app.config["MAIL_USERNAME"] = os.getenv("MAIL_USERNAME")
 app.config["MAIL_PASSWORD"] = os.getenv("MAIL_PASSWORD")
 
@@ -87,7 +85,7 @@ mail = Mail(app)
 allowed_origins = [
     "http://localhost:5173",
     "https://agrovet-shop.vercel.app",
-     "https://headmasterliquors.vercel.app"
+    "https://headmasterliquors.vercel.app"
 ]
 
 CORS(
@@ -112,14 +110,13 @@ CORS(
     },
 )
 
+
 # --------------------------------------------------
 # INITIALIZE DATABASE AND MIGRATIONS
 # --------------------------------------------------
 
 db.init_app(app)
 
-# Enables Flask-Migrate commands (flask db ...).
-# This does not modify the database until a migration is applied.
 migrate = Migrate(app, db)
 
 
@@ -147,11 +144,19 @@ from models.cash_collection import CashCollection
 from models.stock_movement import StockMovement
 from models.branch import Branch
 from models.branch_product_stock import BranchProductStock
-from models.cashier_sale import CashierSale, CashierSaleItem
+
+from models.cashier_sale import (
+    CashierSale,
+    CashierSaleItem
+)
+
 from models.cashier_sale_payment import CashierSalePayment
 from models.cashier_sale_audit import CashierSaleAudit
+
+# Stock batch models
 from models.stock_batch import StockBatch
 from models.stock_batch_allocation import StockBatchAllocation
+
 
 # --------------------------------------------------
 # IMPORT ROUTES
@@ -168,9 +173,12 @@ from routes.payment_routes import payment_bp
 from routes.cashier_routes import cashier_bp
 from routes.cashier_sales import cashier_sales_bp
 from routes.admin_pos_sales import admin_pos_sales_bp
+
+# New multi-product stock receiving route
 from routes.cashier_stock_receiving import (
     cashier_stock_receiving_bp
 )
+
 
 # --------------------------------------------------
 # REGISTER ROUTES
@@ -187,7 +195,10 @@ app.register_blueprint(payment_bp)
 app.register_blueprint(cashier_bp)
 app.register_blueprint(cashier_sales_bp)
 app.register_blueprint(admin_pos_sales_bp)
+
+# Stock receiving
 app.register_blueprint(cashier_stock_receiving_bp)
+
 
 # --------------------------------------------------
 # PUBLIC HEALTH CHECK
@@ -211,7 +222,6 @@ def health():
 # --------------------------------------------------
 # DATABASE DIAGNOSTIC
 # --------------------------------------------------
-# Requires the existing admin authentication token.
 
 from admin_auth import admin_required
 
