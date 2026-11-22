@@ -4851,7 +4851,13 @@ def _extract_source_batch_id(supplier_reference):
 )
 @admin_required
 def get_stock_transfers():
-    """Return paginated transfer history, including both product names."""
+    """
+    Return transfer history without requiring batch-level records.
+
+    StockTransfer and StockTransferItem remain the source of truth for
+    both legacy and current transfers. Batch lineage is supplemental:
+    legacy transfers remain visible with an empty batch_transfers list.
+    """
     try:
         query = StockTransfer.query
         branch_id = request.args.get("branch_id", type=int)
@@ -4862,71 +4868,216 @@ def get_stock_transfers():
                     "status": "error",
                     "message": "Invalid branch ID."
                 }), 400
+
             query = query.filter(or_(
                 StockTransfer.source_branch_id == branch_id,
                 StockTransfer.destination_branch_id == branch_id
             ))
 
-        limit = max(1, min(request.args.get("limit", default=100, type=int) or 100, 500))
-        offset = max(0, request.args.get("offset", default=0, type=int) or 0)
+        limit = max(
+            1,
+            min(request.args.get("limit", default=100, type=int) or 100, 500)
+        )
+        offset = max(
+            0,
+            request.args.get("offset", default=0, type=int) or 0
+        )
+
         total = query.order_by(None).count()
 
         transfers = (
             query.options(selectinload(StockTransfer.items))
-            .order_by(StockTransfer.created_at.desc(), StockTransfer.id.desc())
+            .order_by(
+                StockTransfer.created_at.desc(),
+                StockTransfer.id.desc()
+            )
             .limit(limit)
             .offset(offset)
             .all()
         )
 
-        serialized = []
+        # Resolve all product labels in one query. Keep deleted product
+        # records readable by retaining the IDs and using a clear fallback.
+        product_ids = set()
         for transfer in transfers:
-            item_data = transfer.to_dict()
-            serialized_items = item_data.get("items", []) or []
-            destination_ids = {
-                getattr(item, "destination_product_id", None)
-                for item in (transfer.items or [])
-                if getattr(item, "destination_product_id", None) is not None
-            }
-            destination_products = {}
-            if destination_ids:
-                destination_products = {
-                    product.id: product.name
-                    for product in Product.query.filter(Product.id.in_(destination_ids)).all()
-                }
+            for item in (transfer.items or []):
+                source_product_id = getattr(item, "product_id", None)
+                destination_product_id = getattr(
+                    item, "destination_product_id", None
+                )
+                if source_product_id is not None:
+                    product_ids.add(source_product_id)
+                if destination_product_id is not None:
+                    product_ids.add(destination_product_id)
 
-            # Preserve the model's item order and all existing keys.
-            for index, item in enumerate(transfer.items or []):
-                if index < len(serialized_items):
-                    destination_id = getattr(item, "destination_product_id", None)
-                    serialized_items[index]["destination_product_id"] = destination_id
-                    serialized_items[index]["destination_product_name"] = (
-                        destination_products.get(destination_id) or "Unknown product"
+        products_by_id = {}
+        if product_ids:
+            products_by_id = {
+                product.id: product.name
+                for product in Product.query.filter(
+                    Product.id.in_(product_ids)
+                ).all()
+            }
+
+        serialized = []
+
+        for transfer in transfers:
+            # Start with the existing model serializer to preserve its
+            # established top-level and item fields for the frontend.
+            transfer_data = transfer.to_dict()
+            serialized_items = transfer_data.get("items", []) or []
+
+            # Match serialized rows by item ID where possible. Older
+            # serializers may omit IDs, so retain the original positional
+            # mapping as a backwards-compatible fallback.
+            serialized_by_id = {
+                row.get("id"): row
+                for row in serialized_items
+                if isinstance(row, dict) and row.get("id") is not None
+            }
+
+            normalized_items = []
+
+            for index, transfer_item in enumerate(transfer.items or []):
+                item_id = getattr(transfer_item, "id", None)
+                item_data = serialized_by_id.get(item_id)
+
+                if item_data is None and index < len(serialized_items):
+                    candidate = serialized_items[index]
+                    item_data = (
+                        candidate.copy()
+                        if isinstance(candidate, dict)
+                        else {}
                     )
-                    lineage_batches = StockBatch.query.filter(
-                        StockBatch.branch_id == transfer.destination_branch_id,
-                        StockBatch.product_id == destination_id,
-                        StockBatch.supplier_reference.like(
-                            f"TRANSFER:{transfer.reference};SOURCE_PRODUCT_ID:{getattr(item, 'product_id', '')};%"
-                        ),
-                    ).order_by(StockBatch.id.asc()).all()
-                    serialized_items[index]["batch_transfers"] = [
-                        {
-                            "destination_batch_id": batch.id,
-                            "source_batch_id": _extract_source_batch_id(
-                                batch.supplier_reference
+                elif item_data is not None:
+                    item_data = item_data.copy()
+                else:
+                    item_data = {}
+
+                source_product_id = getattr(
+                    transfer_item, "product_id", None
+                )
+                destination_product_id = getattr(
+                    transfer_item, "destination_product_id", None
+                )
+
+                source_product_name = (
+                    products_by_id.get(source_product_id)
+                    or getattr(transfer_item, "product_name", None)
+                    or "Deleted product"
+                )
+                destination_product_name = (
+                    products_by_id.get(destination_product_id)
+                    if destination_product_id is not None
+                    else None
+                ) or (
+                    "Not recorded"
+                    if destination_product_id is None
+                    else "Deleted product"
+                )
+
+                # Preserve existing serializer values and add explicit,
+                # backwards-compatible product identity fields.
+                item_data.setdefault("id", item_id)
+                item_data.setdefault("product_id", source_product_id)
+                item_data.setdefault(
+                    "product_name",
+                    getattr(transfer_item, "product_name", None)
+                    or source_product_name
+                )
+                item_data["source_product_id"] = source_product_id
+                item_data["source_product_name"] = source_product_name
+                item_data["destination_product_id"] = destination_product_id
+                item_data["destination_product_name"] = destination_product_name
+
+                # These values come from the original transfer item and
+                # remain available even when there are no batch records.
+                for field in (
+                    "quantity",
+                    "source_previous_stock",
+                    "source_new_stock",
+                    "destination_previous_stock",
+                    "destination_new_stock",
+                ):
+                    if field not in item_data and hasattr(transfer_item, field):
+                        value = getattr(transfer_item, field)
+                        item_data[field] = (
+                            float(value) if value is not None else None
+                        )
+
+                # Newer transfers store source-batch lineage in the
+                # destination batch's supplier_reference. Do not make this
+                # lookup a prerequisite for returning the transfer itself.
+                lineage_batches = []
+                if destination_product_id is not None:
+                    lineage_batches = (
+                        StockBatch.query.filter(
+                            StockBatch.branch_id
+                            == transfer.destination_branch_id,
+                            StockBatch.product_id == destination_product_id,
+                            StockBatch.supplier_reference.like(
+                                f"TRANSFER:{transfer.reference};"
+                                f"SOURCE_PRODUCT_ID:{source_product_id};%"
                             ),
-                            "quantity_received": float(batch.quantity_received),
-                            "remaining_quantity": float(batch.remaining_quantity),
-                            "buying_price": float(batch.buying_price),
-                            "selling_price": float(batch.selling_price),
-                            "reference": batch.reference,
-                            "supplier_reference": batch.supplier_reference,
-                        }
-                        for batch in lineage_batches
-                    ]
-            item_data["items"] = serialized_items
-            serialized.append(item_data)
+                        )
+                        .order_by(StockBatch.id.asc())
+                        .all()
+                    )
+
+                batch_transfers = []
+                for batch in lineage_batches:
+                    batch_transfers.append({
+                        "destination_batch_id": batch.id,
+                        "source_batch_id": _extract_source_batch_id(
+                            batch.supplier_reference
+                        ),
+                        "quantity_received": float(
+                            batch.quantity_received or 0
+                        ),
+                        "remaining_quantity": float(
+                            batch.remaining_quantity or 0
+                        ),
+                        "buying_price": float(batch.buying_price or 0),
+                        "selling_price": float(batch.selling_price or 0),
+                        "reference": batch.reference,
+                        "supplier_reference": batch.supplier_reference,
+                    })
+
+                item_data["batch_transfers"] = batch_transfers
+                item_data["batch_details_available"] = bool(batch_transfers)
+                normalized_items.append(item_data)
+
+            # Keep any serializer-provided rows that could not be paired
+            # with a live StockTransferItem. This avoids silently hiding
+            # legacy serialized data if an older model serializer includes
+            # extra historical item representations.
+            if len(serialized_items) > len(normalized_items):
+                for extra in serialized_items[len(normalized_items):]:
+                    if isinstance(extra, dict):
+                        extra_data = extra.copy()
+                        extra_data.setdefault("batch_transfers", [])
+                        extra_data.setdefault(
+                            "batch_details_available", False
+                        )
+                        normalized_items.append(extra_data)
+
+            transfer_data["items"] = normalized_items
+            transfer_data.setdefault("reference", transfer.reference)
+            transfer_data.setdefault(
+                "source_branch_id", transfer.source_branch_id
+            )
+            transfer_data.setdefault(
+                "destination_branch_id", transfer.destination_branch_id
+            )
+            transfer_data.setdefault("status", transfer.status)
+            transfer_data.setdefault(
+                "admin_username", transfer.admin_username
+            )
+            transfer_data.setdefault("created_at", (
+                transfer.created_at.isoformat()
+                if transfer.created_at else None
+            ))
+            serialized.append(transfer_data)
 
         return jsonify({
             "status": "success",
