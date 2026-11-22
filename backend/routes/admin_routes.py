@@ -34,6 +34,7 @@ from models.branch_product_stock import BranchProductStock
 from models.cashier import Cashier
 from models.cashier_sale import CashierSale, CashierSaleItem
 from models.cashier_sale_payment import CashierSalePayment
+from models.stock_batch_allocation import StockBatchAllocation
 
 from admin_auth import admin_required
 
@@ -2419,7 +2420,8 @@ def get_branch_pos_sales(branch_id):
 #
 # POS sales remain separate from website customer orders.
 # Revenue is included only for confirmed paid sales.
-# Historical buying-price snapshots are used for COGS/profit.
+# FIFO batch allocations are used for COGS/profit.
+# Legacy items use only their recorded historical buying-price snapshot.
 # ============================================================
 
 POS_SUCCESSFUL_PAYMENT_STATUSES = {
@@ -2565,17 +2567,44 @@ def decimal_value(value, default="0.00"):
         return Decimal(default)
 
 
+def get_item_batch_allocations(item):
+    """
+    Return the FIFO batch allocations belonging to a POS sale item.
+
+    The relationship is preferred when configured on CashierSaleItem.
+    The direct query is retained as a safe fallback for deployments
+    where the relationship is not exposed on the model.
+    """
+    relationship_allocations = getattr(item, "batch_allocations", None)
+
+    if relationship_allocations is not None:
+        return list(relationship_allocations)
+
+    item_id = getattr(item, "id", None)
+    if item_id is None:
+        return []
+
+    return StockBatchAllocation.query.filter_by(
+        sale_item_id=item_id
+    ).order_by(
+        StockBatchAllocation.id.asc()
+    ).all()
+
+
 def get_pos_item_financials(item):
     """
-    Calculate POS item financial values using Decimal quantities.
+    Calculate POS item financial values using FIFO batch allocations.
 
-    item.quantity is the stock-equivalent quantity consumed.
-    item.sale_quantity is the amount sold in the selected selling unit
-    (for example, one portion). Price is per selling unit, while the
-    historical buying price is per whole stock unit.
+    Each allocation preserves the actual batch buying price, selling
+    price, quantity, revenue and cost used when the sale was processed.
+    Different batch buying prices are summed rather than averaged before
+    calculating COGS. Line revenue uses the cashier-facing unit price
+    multiplied by the selling-unit quantity; this preserves portion-sale
+    revenue even if an older allocation writer stored a faulty split.
 
-    Supports fractional quantities up to three decimal places.
-    Missing historical buying-price snapshots remain unknown, not zero.
+    Legacy sale items without allocations remain readable and use only
+    their recorded historical buying_price snapshot. Today's catalogue
+    prices are never substituted for missing historical costs.
     """
     raw_stock_quantity = getattr(item, "quantity", None)
     raw_sale_quantity = getattr(item, "sale_quantity", None)
@@ -2584,8 +2613,6 @@ def get_pos_item_financials(item):
         return None
 
     if raw_sale_quantity is None:
-        # Backward compatibility for older sale-item rows that predate
-        # the separate selling-unit quantity field.
         raw_sale_quantity = raw_stock_quantity
 
     if isinstance(raw_sale_quantity, bool):
@@ -2611,13 +2638,145 @@ def get_pos_item_financials(item):
         getattr(item, "price", None),
         default="-1.00"
     )
-
     if selling_price < Decimal("0.00"):
         return None
 
-    # Price is per selling unit; quantity is stock-equivalent amount.
-    revenue = selling_price * sale_quantity
+    allocations = get_item_batch_allocations(item)
 
+    if allocations:
+        active_allocations = [
+            allocation for allocation in allocations
+            if not bool(getattr(allocation, "is_restored", False))
+        ]
+
+        allocated_quantity = Decimal("0")
+        allocated_revenue = Decimal("0.00")
+        allocated_cost = Decimal("0.00")
+        all_costs_known = bool(active_allocations)
+        weighted_buying_price_total = Decimal("0.00")
+        weighted_selling_price_total = Decimal("0.00")
+
+        for allocation in active_allocations:
+            quantity = decimal_value(
+                getattr(allocation, "quantity", None),
+                default="-1"
+            )
+            if quantity <= 0 or quantity.as_tuple().exponent < -3:
+                all_costs_known = False
+                continue
+
+            allocated_quantity += quantity
+
+            allocation_selling_price_raw = getattr(
+                allocation, "selling_price", None
+            )
+
+            allocation_buying_price_raw = getattr(
+                allocation, "buying_price", None
+            )
+            allocation_cost_raw = getattr(allocation, "cost", None)
+
+            if allocation_cost_raw is not None:
+                allocation_cost = decimal_value(
+                    allocation_cost_raw,
+                    default="-1"
+                )
+            elif allocation_buying_price_raw is not None:
+                allocation_buying_price = decimal_value(
+                    allocation_buying_price_raw,
+                    default="-1"
+                )
+                allocation_cost = allocation_buying_price * quantity
+            else:
+                allocation_cost = Decimal("-1")
+
+            if allocation_cost < 0:
+                all_costs_known = False
+            else:
+                allocated_cost += allocation_cost
+
+            if allocation_buying_price_raw is not None:
+                allocation_buying_price = decimal_value(
+                    allocation_buying_price_raw,
+                    default="-1"
+                )
+                if allocation_buying_price >= 0:
+                    weighted_buying_price_total += (
+                        allocation_buying_price * quantity
+                    )
+
+            if allocation_selling_price_raw is not None:
+                allocation_selling_price = decimal_value(
+                    allocation_selling_price_raw,
+                    default="-1"
+                )
+                if allocation_selling_price >= 0:
+                    weighted_selling_price_total += (
+                        allocation_selling_price * quantity
+                    )
+
+        # A partial allocation is not treated as a complete historical
+        # cost record. Preserve the sale-line revenue, but flag all its
+        # cost as unknown rather than silently omitting unallocated units.
+        quantity_matches = abs(
+            allocated_quantity - stock_quantity
+        ) <= Decimal("0.001")
+
+        if active_allocations and quantity_matches:
+            if allocated_quantity > 0:
+                weighted_buying_price = (
+                    allocated_cost / allocated_quantity
+                    if all_costs_known
+                    else None
+                )
+                weighted_selling_price = (
+                    weighted_selling_price_total / allocated_quantity
+                    if weighted_selling_price_total > 0
+                    else selling_price
+                )
+            else:
+                weighted_buying_price = None
+                weighted_selling_price = selling_price
+
+            return {
+                "quantity": allocated_quantity,
+                "stock_quantity": allocated_quantity,
+                "sale_quantity": sale_quantity,
+                "selling_price": weighted_selling_price,
+                # Use the actual customer-facing sale-line price and
+                # selling-unit quantity. The current allocation service's
+                # stored revenue formula does not correctly handle portions.
+                "revenue": selling_price * sale_quantity,
+                "buying_price": weighted_buying_price,
+                "cost": allocated_cost if all_costs_known else None,
+                "profit": (
+                    allocated_revenue - allocated_cost
+                    if all_costs_known
+                    else None
+                ),
+                "batch_allocation_count": len(active_allocations),
+                "batch_allocated": True,
+            }
+
+        # Allocations exist but do not cover the sale-item quantity.
+        # Do not fall back to a legacy item buying price: that would hide
+        # the incomplete FIFO history and could misstate COGS.
+        return {
+            "quantity": stock_quantity,
+            "stock_quantity": stock_quantity,
+            "sale_quantity": sale_quantity,
+            "selling_price": selling_price,
+            "revenue": selling_price * sale_quantity,
+            "buying_price": None,
+            "cost": None,
+            "profit": None,
+            "batch_allocation_count": len(active_allocations),
+            "batch_allocated": False,
+        }
+
+    # Legacy compatibility: older POS items may predate batch allocation.
+    # Use the recorded historical buying_price only; never today's Product BP.
+    revenue = selling_price * sale_quantity
     raw_buying_price = getattr(item, "buying_price", None)
 
     if raw_buying_price is None:
@@ -2630,26 +2789,19 @@ def get_pos_item_financials(item):
             "buying_price": None,
             "cost": None,
             "profit": None,
+            "batch_allocation_count": 0,
+            "batch_allocated": False,
         }
 
-    buying_price = decimal_value(
-        raw_buying_price,
-        default="-1.00"
-    )
-
+    buying_price = decimal_value(raw_buying_price, default="-1.00")
     if buying_price < Decimal("0.00"):
-        return {
-            "quantity": stock_quantity,
-            "stock_quantity": stock_quantity,
-            "sale_quantity": sale_quantity,
-            "selling_price": selling_price,
-            "revenue": revenue,
-            "buying_price": None,
-            "cost": None,
-            "profit": None,
-        }
+        buying_price = None
 
-    cost = buying_price * stock_quantity
+    cost = (
+        buying_price * stock_quantity
+        if buying_price is not None
+        else None
+    )
 
     return {
         "quantity": stock_quantity,
@@ -2659,7 +2811,9 @@ def get_pos_item_financials(item):
         "revenue": revenue,
         "buying_price": buying_price,
         "cost": cost,
-        "profit": revenue - cost,
+        "profit": revenue - cost if cost is not None else None,
+        "batch_allocation_count": 0,
+        "batch_allocated": False,
     }
 
 
@@ -2679,7 +2833,9 @@ def get_pos_report_items(sales):
     if not sale_ids:
         return []
 
-    return CashierSaleItem.query.filter(
+    return CashierSaleItem.query.options(
+        selectinload(CashierSaleItem.batch_allocations)
+    ).filter(
         CashierSaleItem.sale_id.in_(sale_ids)
     ).order_by(
         CashierSaleItem.id.asc()
@@ -3782,6 +3938,7 @@ def export_all_pos_reports_excel():
         branch_ws = workbook.create_sheet("Branch Performance")
         product_ws = workbook.create_sheet("Product Performance")
         void_ws = workbook.create_sheet("Voided Sales")
+        batch_ws = workbook.create_sheet("Batch Allocations")
 
         title_fill = PatternFill("solid", fgColor="17365D")
         title_font = Font(color="FFFFFF", bold=True)
@@ -4090,7 +4247,7 @@ def export_all_pos_reports_excel():
                 "Stock Quantity (3 d.p.)",
                 "Selling Quantity (3 d.p.)",
                 "Selling Unit Price",
-                "Historical Buying Price",
+                "Weighted Historical Buying Price",
                 "Line Revenue",
                 "Cost of Goods Sold",
                 "Gross Profit",
@@ -4098,6 +4255,128 @@ def export_all_pos_reports_excel():
                 "Confirmed Paid Sale",
             ],
             item_rows
+        )
+
+        # ----------------------------------------------------
+        # FIFO BATCH ALLOCATION DETAIL
+        # ----------------------------------------------------
+        # Keep one row per consumed batch so different historical
+        # buying prices remain visible and independently auditable.
+        batch_allocation_rows = []
+
+        for item in items:
+            sale = sales_by_id.get(getattr(item, "sale_id", None))
+            product = product_map.get(getattr(item, "product_id", None))
+            allocations = get_item_batch_allocations(item)
+            active_allocations = [
+                allocation for allocation in allocations
+                if not bool(getattr(allocation, "is_restored", False))
+            ]
+            total_active_allocation_quantity = sum(
+                (
+                    decimal_value(getattr(allocation, "quantity", 0), "0")
+                    for allocation in active_allocations
+                ),
+                Decimal("0")
+            )
+            item_line_revenue = (
+                decimal_value(getattr(item, "price", 0))
+                * decimal_value(
+                    getattr(item, "sale_quantity", getattr(item, "quantity", 0)),
+                    "0"
+                )
+            )
+
+            for allocation in allocations:
+                allocation_quantity = decimal_value(
+                    getattr(allocation, "quantity", 0), "0"
+                )
+                allocation_buying_price = getattr(
+                    allocation, "buying_price", None
+                )
+                allocation_selling_price = getattr(
+                    allocation, "selling_price", None
+                )
+                allocation_revenue = getattr(
+                    allocation, "revenue", None
+                )
+                if (
+                    not bool(getattr(allocation, "is_restored", False))
+                    and total_active_allocation_quantity > 0
+                ):
+                    # Reporting allocation: distribute the sale-line
+                    # revenue over consumed batches by stock quantity.
+                    allocation_revenue = (
+                        item_line_revenue
+                        * allocation_quantity
+                        / total_active_allocation_quantity
+                    )
+                allocation_cost = getattr(allocation, "cost", None)
+                allocation_profit = getattr(
+                    allocation, "gross_profit", None
+                )
+
+                if allocation_cost is None and allocation_buying_price is not None:
+                    allocation_cost = (
+                        decimal_value(allocation_buying_price)
+                        * allocation_quantity
+                    )
+
+                if allocation_profit is None and (
+                    allocation_revenue is not None
+                    and allocation_cost is not None
+                ):
+                    allocation_profit = (
+                        decimal_value(allocation_revenue)
+                        - decimal_value(allocation_cost)
+                    )
+
+                batch_allocation_rows.append([
+                    getattr(allocation, "id", None),
+                    getattr(allocation, "batch_id", None),
+                    getattr(item, "id", None),
+                    getattr(item, "sale_id", None),
+                    getattr(sale, "sale_number", None) if sale else None,
+                    safe_datetime(getattr(sale, "created_at", None)) if sale else None,
+                    getattr(sale, "branch_id", None) if sale else None,
+                    branch_name(sale) if sale else "Unknown branch",
+                    getattr(item, "product_id", None),
+                    getattr(product, "name", None) or "Deleted product",
+                    float(allocation_quantity),
+                    float(allocation_buying_price) if allocation_buying_price is not None else None,
+                    float(allocation_selling_price) if allocation_selling_price is not None else None,
+                    float(allocation_revenue) if allocation_revenue is not None else None,
+                    float(allocation_cost) if allocation_cost is not None else None,
+                    float(allocation_profit) if allocation_profit is not None else None,
+                    "Yes" if bool(getattr(allocation, "is_restored", False)) else "No",
+                    getattr(allocation, "restoration_reference", None),
+                    "Yes" if sale and sale.id in paid_sale_ids else "No",
+                ])
+
+        write_table(
+            batch_ws,
+            [
+                "Allocation ID",
+                "Batch ID",
+                "Sale Item ID",
+                "Sale ID",
+                "Sale Number",
+                "Sale Date/Time",
+                "Branch ID",
+                "Branch",
+                "Product ID",
+                "Product",
+                "Allocated Stock Quantity (3 d.p.)",
+                "Batch Buying Price",
+                "Batch Selling Price",
+                "Allocated Revenue (proportional)",
+                "Allocation Cost",
+                "Allocation Gross Profit",
+                "Stock Restored",
+                "Restoration Reference",
+                "Confirmed Paid Sale",
+            ],
+            batch_allocation_rows
         )
 
         # ----------------------------------------------------
@@ -4250,8 +4529,10 @@ def export_all_pos_reports_excel():
             ],
             [
                 "Profit Note",
-                "Gross profit is partial when historical buying "
-                "prices are missing; it is not net profit."
+                "Gross profit uses FIFO batch allocation costs where "
+                "available and legacy historical buying-price snapshots "
+                "for older items. It is partial when costs are unknown; "
+                "it is not net profit."
             ],
             [
                 "Scope Note",
@@ -4618,7 +4899,7 @@ def export_all_pos_reports_excel():
                 "Item ID", "Sale ID", "Sale Number", "Sale Date/Time", "Branch",
                 "Product ID", "Product", "Stock Quantity (3 d.p.)",
                 "Selling Quantity (3 d.p.)", "Selling Unit Price",
-                "Historical Buying Price", "Line Revenue", "Cost of Goods Sold",
+                "Weighted Historical Buying Price", "Line Revenue", "Cost of Goods Sold",
                 "Gross Profit", "Cost Data", "Confirmed Paid Sale",
             ], branch_item_rows)
 
@@ -4675,6 +4956,11 @@ def export_all_pos_reports_excel():
             "Amount",
             "Selling Unit Price",
             "Historical Buying Price",
+            "Batch Buying Price",
+            "Batch Selling Price",
+            "Allocation Revenue",
+            "Allocation Cost",
+            "Allocation Gross Profit",
             "Line Revenue",
             "Cost of Goods Sold",
             "Gross Profit",
