@@ -8,20 +8,17 @@ from flask import Blueprint, jsonify, request, g
 from sqlalchemy import select
 
 from extensions import db
-
 from models.cashier import Cashier
 from models.product import Product
 from models.branch import Branch
 from models.branch_product_stock import BranchProductStock
 from models.cashier_sale import CashierSale, CashierSaleItem
 from models.cashier_sale_payment import CashierSalePayment
+from models.stock_batch import StockBatch
+from models.stock_batch_allocation import StockBatchAllocation
 
 from cashier_auth import cashier_required
 
-
-# ============================================================
-# CONFIGURATION
-# ============================================================
 
 cashier_sales_bp = Blueprint(
     "cashier_sales_bp",
@@ -37,7 +34,7 @@ QUANTITY_PLACES = Decimal("0.001")
 
 
 # ============================================================
-# HELPERS
+# GENERAL HELPERS
 # ============================================================
 
 def error_response(message, status_code):
@@ -48,10 +45,6 @@ def error_response(message, status_code):
 
 
 def decimal_value(value):
-    """
-    Convert a value to Decimal without using float arithmetic.
-    Reject booleans, non-finite values, and invalid numbers.
-    """
     if isinstance(value, bool) or value is None:
         return None
 
@@ -63,14 +56,16 @@ def decimal_value(value):
 
         return result
 
-    except (InvalidOperation, ValueError, TypeError, AttributeError):
+    except (
+        InvalidOperation,
+        ValueError,
+        TypeError,
+        AttributeError
+    ):
         return None
 
 
 def validate_quantity(value):
-    """
-    Accept positive quantities with at most three decimal places.
-    """
     quantity = decimal_value(value)
 
     if quantity is None or quantity <= ZERO:
@@ -83,9 +78,6 @@ def validate_quantity(value):
 
 
 def validate_price(value):
-    """
-    Accept non-negative monetary values with at most two decimal places.
-    """
     price = decimal_value(value)
 
     if price is None or price < ZERO:
@@ -98,7 +90,7 @@ def validate_price(value):
 
 
 def money(value):
-    return Decimal(value).quantize(
+    return Decimal(str(value)).quantize(
         MONEY_PLACES,
         rounding=ROUND_HALF_UP
     )
@@ -114,10 +106,6 @@ def get_active_cashier():
 
 
 def get_cashier_branch(cashier):
-    """
-    Retrieve the active branch assigned to the authenticated cashier.
-    """
-
     if not cashier.branch_id:
         return None
 
@@ -129,25 +117,7 @@ def get_cashier_branch(cashier):
     ).scalar_one_or_none()
 
 
-def get_branch_stock(branch_id, product_id, lock=False):
-    statement = select(BranchProductStock).where(
-        BranchProductStock.branch_id == branch_id,
-        BranchProductStock.product_id == product_id
-    )
-
-    if lock:
-        statement = statement.with_for_update()
-
-    return db.session.execute(
-        statement
-    ).scalar_one_or_none()
-
-
 def get_sale_for_cashier(sale_id, cashier):
-    """
-    A cashier can access only their own sales.
-    """
-
     return db.session.execute(
         select(CashierSale).where(
             CashierSale.id == sale_id,
@@ -157,10 +127,6 @@ def get_sale_for_cashier(sale_id, cashier):
 
 
 def normalize_selling_unit(value):
-    """
-    Normalize the requested selling unit.
-    """
-
     if not isinstance(value, str):
         return None
 
@@ -176,31 +142,161 @@ def normalize_selling_unit(value):
 
 
 # ============================================================
+# FIFO STOCK BATCH ALLOCATION
+# ============================================================
+
+def allocate_stock_from_batches(
+    sale_item,
+    branch_id,
+    product,
+    required_quantity,
+    selling_unit,
+    sale_quantity,
+    selling_price
+):
+    """
+    Consume stock from the oldest available batches first.
+
+    Every allocation records:
+      - Original batch
+      - Quantity consumed
+      - Original batch buying price
+      - Original batch selling price
+      - Revenue attributable to the allocation
+      - Cost attributable to the allocation
+
+    All operations run inside the parent sale transaction.
+    """
+
+    required_quantity = Decimal(str(required_quantity))
+
+    batches = db.session.execute(
+        select(StockBatch)
+        .where(
+            StockBatch.branch_id == branch_id,
+            StockBatch.product_id == product.id,
+            StockBatch.remaining_quantity > ZERO
+        )
+        .order_by(
+            StockBatch.created_at.asc(),
+            StockBatch.id.asc()
+        )
+        .with_for_update()
+    ).scalars().all()
+
+    available = sum(
+        (
+            Decimal(str(batch.remaining_quantity))
+            for batch in batches
+        ),
+        ZERO
+    )
+
+    if available < required_quantity:
+        raise ValueError(
+            f"Batch stock mismatch for {product.name}. "
+            f"Available in batches: {available:.3f}; "
+            f"required: {required_quantity:.3f}."
+        )
+
+    remaining = required_quantity
+    allocations = []
+
+    for batch in batches:
+        if remaining <= ZERO:
+            break
+
+        batch_available = Decimal(
+            str(batch.remaining_quantity)
+        )
+
+        if batch_available <= ZERO:
+            continue
+
+        allocated_quantity = min(
+            batch_available,
+            remaining
+        ).quantize(QUANTITY_PLACES)
+
+        batch_buying_price = validate_price(
+            batch.buying_price
+        )
+
+        batch_selling_price = validate_price(
+            batch.selling_price
+        )
+
+        if batch_buying_price is None:
+            raise ValueError(
+                f"Batch {batch.id} has an invalid buying price."
+            )
+
+        if batch_selling_price is None:
+            raise ValueError(
+                f"Batch {batch.id} has an invalid selling price."
+            )
+
+        cost = money(
+            batch_buying_price * allocated_quantity
+        )
+
+        # Whole-unit sales use the selling price stored
+        # on the actual stock batch.
+        #
+        # Portion sales use the configured portion price.
+        # Revenue is calculated using customer-facing
+        # quantity, not stock-equivalent quantity.
+        if selling_unit == "portion":
+            allocation_revenue = money(
+                selling_price
+                * (
+                    sale_quantity
+                    * allocated_quantity
+                    / required_quantity
+                )
+            )
+        else:
+            allocation_revenue = money(
+                batch_selling_price * allocated_quantity
+            )
+
+        allocation = StockBatchAllocation(
+            batch_id=batch.id,
+            sale_item_id=sale_item.id,
+            quantity=allocated_quantity,
+            buying_price=batch_buying_price,
+            selling_price=batch_selling_price,
+            revenue=allocation_revenue,
+            cost=cost,
+            gross_profit=money(
+                allocation_revenue - cost
+            )
+        )
+
+        db.session.add(allocation)
+
+        batch.remaining_quantity = (
+            batch_available - allocated_quantity
+        ).quantize(QUANTITY_PLACES)
+
+        allocations.append(allocation)
+
+        remaining = (
+            remaining - allocated_quantity
+        ).quantize(QUANTITY_PLACES)
+
+    if remaining > ZERO:
+        raise ValueError(
+            f"Unable to allocate the complete quantity "
+            f"for {product.name}."
+        )
+
+    return allocations
+
+
+# ============================================================
 # CREATE CASHIER SALE
-#
 # POST /api/cashier/sales
-#
-# This endpoint writes to cashier_sales and cashier_sale_items.
-# It does not create a website Order.
-#
-# Whole-unit item example:
-# {
-#     "product_id": 1,
-#     "quantity": 1,
-#     "selling_unit": "unit"
-# }
-#
-# Portion item example:
-# {
-#     "product_id": 1,
-#     "quantity": 2,
-#     "selling_unit": "portion"
-# }
-#
-# Portion configuration is read from Product:
-# allow_portion_sales
-# portions_per_unit
-# portion_price
 # ============================================================
 
 @cashier_sales_bp.route("/sales", methods=["POST"])
@@ -251,8 +347,9 @@ def create_cashier_sale():
     payment_method = payment_method.strip().lower()
 
     try:
+
         # ----------------------------------------------------
-        # VALIDATE BRANCH ASSIGNMENT
+        # BRANCH
         # ----------------------------------------------------
 
         branch = get_cashier_branch(cashier)
@@ -267,7 +364,7 @@ def create_cashier_sale():
             )
 
         # ----------------------------------------------------
-        # VALIDATE CART LINES
+        # VALIDATE CART
         # ----------------------------------------------------
 
         requested_lines = []
@@ -320,12 +417,8 @@ def create_cashier_sale():
                     400
                 )
 
-            # Default to whole-unit sales for compatibility
-            # with existing cashier clients.
-            raw_selling_unit = item.get("selling_unit", "unit")
-
             selling_unit = normalize_selling_unit(
-                raw_selling_unit
+                item.get("selling_unit", "unit")
             )
 
             if selling_unit is None:
@@ -344,11 +437,11 @@ def create_cashier_sale():
 
             product_ids.add(product_id)
 
+        sorted_product_ids = sorted(product_ids)
+
         # ----------------------------------------------------
         # LOCK PRODUCTS
         # ----------------------------------------------------
-
-        sorted_product_ids = sorted(product_ids)
 
         products = db.session.execute(
             select(Product)
@@ -392,10 +485,9 @@ def create_cashier_sale():
         }
 
         # ----------------------------------------------------
-        # VALIDATE LINES AND CALCULATE STOCK CONSUMPTION
+        # VALIDATE QUANTITIES AND PRICES
         # ----------------------------------------------------
 
-        total = ZERO
         validated_items = []
         stock_required_by_product = {}
 
@@ -425,6 +517,10 @@ def create_cashier_sale():
                     f"in the stock records for {branch.name}.",
                     409
                 )
+
+            # -----------------------------------------------
+            # PORTION SALES
+            # -----------------------------------------------
 
             if selling_unit == "portion":
 
@@ -460,11 +556,11 @@ def create_cashier_sale():
                         409
                     )
 
-                portion_price = validate_price(
+                price = validate_price(
                     getattr(product, "portion_price", None)
                 )
 
-                if portion_price is None or portion_price <= ZERO:
+                if price is None or price <= ZERO:
                     db.session.rollback()
 
                     return error_response(
@@ -473,35 +569,21 @@ def create_cashier_sale():
                         409
                     )
 
-                # Portion counts may be decimal to support the
-                # application's three-decimal quantity requirement.
-                price = portion_price
-
                 stock_quantity = (
-                    sale_quantity
-                    / Decimal(portions_per_unit)
+                    sale_quantity / Decimal(portions_per_unit)
                 )
+
+            # -----------------------------------------------
+            # WHOLE-UNIT SALES
+            # -----------------------------------------------
 
             else:
 
-                price = validate_price(product.price)
-
-                if price is None:
-                    db.session.rollback()
-
-                    logger.error(
-                        "Invalid stored price for product ID %s.",
-                        product.id
-                    )
-
-                    return error_response(
-                        "A product has an invalid stored price.",
-                        500
-                    )
-
+                # The final selling price is taken from the
+                # FIFO batches, not the current catalogue price.
+                price = None
                 stock_quantity = sale_quantity
 
-            # Branch stock supports three decimal places.
             stock_quantity = stock_quantity.quantize(
                 QUANTITY_PLACES,
                 rounding=ROUND_HALF_UP
@@ -516,39 +598,8 @@ def create_cashier_sale():
                     400
                 )
 
-            buying_price = (
-                validate_price(product.buying_price)
-                if product.buying_price is not None
-                else None
-            )
-
-            if (
-                product.buying_price is not None
-                and buying_price is None
-            ):
-                db.session.rollback()
-
-                logger.error(
-                    "Invalid buying price for product ID %s.",
-                    product.id
-                )
-
-                return error_response(
-                    "A product has an invalid stored buying price.",
-                    500
-                )
-
-            # Calculate revenue using the quantity sold,
-            # not the stock-equivalent quantity.
-            line_total = money(price * sale_quantity)
-
-            total += line_total
-
             stock_required_by_product[product_id] = (
-                stock_required_by_product.get(
-                    product_id,
-                    ZERO
-                )
+                stock_required_by_product.get(product_id, ZERO)
                 + stock_quantity
             )
 
@@ -558,18 +609,11 @@ def create_cashier_sale():
                 "stock_quantity": stock_quantity,
                 "sale_quantity": sale_quantity,
                 "selling_unit": selling_unit,
-                "price": price,
-                "buying_price": buying_price
+                "price": price
             })
 
-        total = money(total)
-
         # ----------------------------------------------------
-        # CHECK COMBINED STOCK REQUIREMENTS
-        #
-        # Important: the same product can appear more than
-        # once, for example as both a bottle and portions.
-        # Check the combined consumption before deducting stock.
+        # CHECK COMBINED BRANCH STOCK
         # ----------------------------------------------------
 
         for product_id, required_quantity in (
@@ -595,21 +639,22 @@ def create_cashier_sale():
                 )
 
         # ----------------------------------------------------
-        # CREATE INDEPENDENT CASHIER SALE
+        # CREATE SALE
         # ----------------------------------------------------
 
-        if payment_method == "cash":
-            payment_status = "paid"
-            sale_status = "completed"
-        else:
-            payment_status = "unpaid"
-            sale_status = "pending"
+        payment_status = (
+            "paid" if payment_method == "cash" else "unpaid"
+        )
+
+        sale_status = (
+            "completed" if payment_method == "cash" else "pending"
+        )
 
         sale = CashierSale(
             sale_number=f"POS-{uuid.uuid4().hex[:12].upper()}",
             branch_id=branch.id,
             cashier_id=cashier.id,
-            total=total,
+            total=ZERO,
             payment_method=payment_method,
             payment_status=payment_status,
             status=sale_status
@@ -619,34 +664,98 @@ def create_cashier_sale():
         db.session.flush()
 
         # ----------------------------------------------------
-        # SAVE SALE ITEMS
+        # CREATE ITEMS AND CONSUME FIFO BATCHES
         # ----------------------------------------------------
+
+        total = ZERO
 
         for item in validated_items:
 
+            product = item["product"]
+
             sale_item = CashierSaleItem(
                 sale_id=sale.id,
-                product_id=item["product"].id,
-
-                # Stock-equivalent quantity consumed.
+                product_id=product.id,
                 quantity=item["stock_quantity"],
-
-                # Actual quantity sold to the customer.
                 sale_quantity=item["sale_quantity"],
-
                 selling_unit=item["selling_unit"],
-
-                # Price per selling unit.
-                price=item["price"],
-
-                # Cost per whole stock unit.
-                buying_price=item["buying_price"]
+                price=(
+                    item["price"]
+                    if item["price"] is not None
+                    else ZERO
+                ),
+                buying_price=None
             )
 
             db.session.add(sale_item)
+            db.session.flush()
+
+            allocations = allocate_stock_from_batches(
+                sale_item=sale_item,
+                branch_id=branch.id,
+                product=product,
+                required_quantity=item["stock_quantity"],
+                selling_unit=item["selling_unit"],
+                sale_quantity=item["sale_quantity"],
+                selling_price=(
+                    item["price"]
+                    if item["price"] is not None
+                    else ZERO
+                )
+            )
+
+            # -----------------------------------------------
+            # CALCULATE ITEM REVENUE AND COST FROM ALLOCATIONS
+            # -----------------------------------------------
+
+            item_revenue = sum(
+                (
+                    Decimal(str(allocation.revenue))
+                    for allocation in allocations
+                ),
+                ZERO
+            )
+
+            item_cost = sum(
+                (
+                    Decimal(str(allocation.cost))
+                    for allocation in allocations
+                ),
+                ZERO
+            )
+
+            item_revenue = money(item_revenue)
+            item_cost = money(item_cost)
+
+            # Store weighted average batch prices on the
+            # sale item for backward-compatible sale records.
+            allocated_quantity = sum(
+                (
+                    Decimal(str(allocation.quantity))
+                    for allocation in allocations
+                ),
+                ZERO
+            )
+
+            if allocated_quantity > ZERO:
+                sale_item.buying_price = money(
+                    item_cost / allocated_quantity
+                )
+
+            if item["selling_unit"] == "unit":
+                sale_item.price = money(
+                    item_revenue / item["sale_quantity"]
+                )
+            else:
+                sale_item.price = item["price"]
+
+            total += item_revenue
+
+        total = money(total)
+        sale.total = total
 
         # ----------------------------------------------------
-        # DEDUCT BRANCH STOCK ONCE PER PRODUCT
+        # DEDUCT BRANCH STOCK
         # ----------------------------------------------------
 
         for product_id, required_quantity in (
@@ -661,32 +770,32 @@ def create_cashier_sale():
             ).quantize(QUANTITY_PLACES)
 
         # ----------------------------------------------------
-        # RECORD CASH PAYMENT
+        # CASH PAYMENT
         # ----------------------------------------------------
 
         if payment_method == "cash":
 
-            cash_payment = CashierSalePayment(
-                sale_id=sale.id,
-                payment_method="cash",
-                amount=total,
-                status="paid"
+            db.session.add(
+                CashierSalePayment(
+                    sale_id=sale.id,
+                    payment_method="cash",
+                    amount=total,
+                    status="paid"
+                )
             )
 
-            db.session.add(cash_payment)
-
-        # M-Pesa initiation and callback remain separate.
-        # Do not mark an M-Pesa sale paid here.
+        # M-Pesa payment initiation and callback remain separate.
 
         db.session.commit()
 
         logger.info(
             "Cashier sale created: sale_id=%s, branch_id=%s, "
-            "cashier_id=%s, payment_method=%s",
+            "cashier_id=%s, payment_method=%s, total=%s",
             sale.id,
             branch.id,
             cashier.id,
-            payment_method
+            payment_method,
+            total
         )
 
         return jsonify({
@@ -703,6 +812,17 @@ def create_cashier_sale():
             "payment_required": payment_method == "mpesa"
         }), 201
 
+    except ValueError as exc:
+
+        db.session.rollback()
+
+        logger.warning(
+            "Cashier sale validation failed: %s",
+            str(exc)
+        )
+
+        return error_response(str(exc), 409)
+
     except Exception:
 
         db.session.rollback()
@@ -718,8 +838,7 @@ def create_cashier_sale():
 
 
 # ============================================================
-# CANCEL A PENDING CASHIER SALE
-#
+# CANCEL PENDING CASHIER SALE
 # POST /api/cashier/sales/<sale_id>/cancel
 # ============================================================
 
@@ -826,16 +945,8 @@ def cancel_cashier_sale(sale_id):
 
         for item in sale.items:
 
-            stock = stock_by_product_id.get(item.product_id)
-
-            if not stock:
+            if item.product_id not in stock_by_product_id:
                 db.session.rollback()
-
-                logger.error(
-                    "Missing branch stock for sale %s, product %s.",
-                    sale.id,
-                    item.product_id
-                )
 
                 return error_response(
                     "A branch stock record is missing. "
@@ -843,7 +954,57 @@ def cancel_cashier_sale(sale_id):
                     409
                 )
 
-        # Restore the actual stock-equivalent quantity consumed.
+        # ----------------------------------------------------
+        # RESTORE THE ORIGINAL BATCHES
+        # ----------------------------------------------------
+
+        for item in sale.items:
+
+            allocations = db.session.execute(
+                select(StockBatchAllocation)
+                .where(
+                    StockBatchAllocation.sale_item_id == item.id
+                )
+                .with_for_update()
+            ).scalars().all()
+
+            if not allocations:
+                db.session.rollback()
+
+                return error_response(
+                    "Batch allocation records are missing for "
+                    "this sale. Automatic restoration was stopped.",
+                    409
+                )
+
+            for allocation in allocations:
+
+                batch = db.session.execute(
+                    select(StockBatch)
+                    .where(
+                        StockBatch.id == allocation.batch_id
+                    )
+                    .with_for_update()
+                ).scalar_one_or_none()
+
+                if not batch:
+                    db.session.rollback()
+
+                    return error_response(
+                        "An original stock batch could not be found. "
+                        "Automatic restoration was stopped.",
+                        409
+                    )
+
+                batch.remaining_quantity = (
+                    Decimal(str(batch.remaining_quantity))
+                    + Decimal(str(allocation.quantity))
+                ).quantize(QUANTITY_PLACES)
+
+        # ----------------------------------------------------
+        # RESTORE BRANCH STOCK
+        # ----------------------------------------------------
+
         for item in sale.items:
 
             stock = stock_by_product_id[item.product_id]
@@ -861,7 +1022,8 @@ def cancel_cashier_sale(sale_id):
         return jsonify({
             "status": "success",
             "message": (
-                "Pending sale cancelled and branch stock restored."
+                "Pending sale cancelled. Original stock batches "
+                "and branch stock have been restored."
             ),
             "sale": sale.to_dict()
         }), 200
@@ -884,7 +1046,6 @@ def cancel_cashier_sale(sale_id):
 
 # ============================================================
 # CHECK CASHIER SALE PAYMENT STATUS
-#
 # GET /api/cashier/sales/<sale_id>/payment-status
 # ============================================================
 
@@ -935,37 +1096,23 @@ def cashier_payment_status(sale_id):
             "branch_id": sale.branch_id,
             "sale_status": sale.status,
             "payment_status": sale.payment_status,
-
             "transaction_status": (
-                payment.status
-                if payment
-                else "not_initiated"
+                payment.status if payment else "not_initiated"
             ),
-
             "checkout_request_id": (
-                payment.checkout_request_id
-                if payment
-                else None
+                payment.checkout_request_id if payment else None
             ),
-
             "mpesa_receipt_number": (
-                payment.mpesa_receipt_number
-                if payment
-                else None
+                payment.mpesa_receipt_number if payment else None
             ),
-
             "phone_number": (
-                payment.phone_number
-                if payment
-                else None
+                payment.phone_number if payment else None
             ),
-
             "amount": (
                 float(payment.amount)
                 if payment
                 else float(sale.total)
             ),
-
             "message": (
                 payment.result_description
                 if payment
@@ -988,7 +1135,6 @@ def cashier_payment_status(sale_id):
 
 # ============================================================
 # CASHIER SALES HISTORY
-#
 # GET /api/cashier/sales
 # ============================================================
 
@@ -1044,6 +1190,7 @@ def get_cashier_sales():
         end_date = request.args.get("end_date")
 
         if start_date:
+
             try:
                 start_datetime = datetime.strptime(
                     start_date,
@@ -1061,6 +1208,7 @@ def get_cashier_sales():
             )
 
         if end_date:
+
             try:
                 end_datetime = datetime.strptime(
                     end_date,
