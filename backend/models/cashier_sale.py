@@ -1,12 +1,27 @@
 import uuid
 from datetime import datetime
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 
 from extensions import db
 
 
 ZERO = Decimal("0.00")
 ZERO_QUANTITY = Decimal("0.000")
+MONEY_PLACES = Decimal("0.01")
+
+
+def decimal_value(value, default=ZERO):
+    if value is None:
+        return default
+
+    return Decimal(str(value))
+
+
+def money(value):
+    return Decimal(str(value)).quantize(
+        MONEY_PLACES,
+        rounding=ROUND_HALF_UP
+    )
 
 
 class CashierSale(db.Model):
@@ -67,6 +82,8 @@ class CashierSale(db.Model):
         index=True
     )
 
+    # Relationships
+
     branch = db.relationship(
         "Branch",
         back_populates="sales"
@@ -90,18 +107,13 @@ class CashierSale(db.Model):
 
     def to_dict(self):
 
-        total = (
-            Decimal(str(self.total))
-            if self.total is not None
-            else ZERO
-        )
+        total = decimal_value(self.total)
 
         return {
             "id": self.id,
             "sale_number": self.sale_number,
 
             "branch_id": self.branch_id,
-
             "branch_name": (
                 self.branch.name
                 if self.branch
@@ -109,7 +121,6 @@ class CashierSale(db.Model):
             ),
 
             "cashier_id": self.cashier_id,
-
             "cashier_name": (
                 self.cashier.full_name
                 if self.cashier
@@ -136,7 +147,6 @@ class CashierSale(db.Model):
 
 
 class CashierSaleItem(db.Model):
-
     __tablename__ = "cashier_sale_items"
 
     id = db.Column(
@@ -164,35 +174,58 @@ class CashierSaleItem(db.Model):
         index=True
     )
 
-    # Stock-equivalent quantity consumed.
+    # Quantity deducted from stock, expressed in whole-stock
+    # unit equivalents.
+    #
+    # Example:
+    # 2 portions from a bottle containing 4 portions:
+    # quantity = 0.500
+
     quantity = db.Column(
         db.Numeric(12, 3),
         nullable=False
     )
 
-    # Actual quantity sold.
+    # Actual customer-facing quantity sold.
+    #
+    # Example:
+    # 2 portions:
+    # sale_quantity = 2.000
+
     sale_quantity = db.Column(
         db.Numeric(12, 3),
         nullable=False
     )
+
+    # Examples: unit, bottle, portion.
 
     selling_unit = db.Column(
         db.String(50),
         nullable=False
     )
 
-    # Selling price per selling unit.
+    # Price per customer-facing selling unit.
+    #
+    # For a sale spanning multiple batches with different
+    # selling prices, this stores the weighted average price.
+    #
+    # Exact batch prices remain in stock_batch_allocations.
+
     price = db.Column(
         db.Numeric(10, 2),
         nullable=False
     )
 
-    # Historical BP per whole stock unit.
-    # Retained for compatibility with existing sales.
+    # Weighted average buying price per whole stock unit.
+    #
+    # Exact batch costs remain in stock_batch_allocations.
+
     buying_price = db.Column(
         db.Numeric(10, 2),
         nullable=True
     )
+
+    # Relationships
 
     sale = db.relationship(
         "CashierSale",
@@ -203,8 +236,8 @@ class CashierSaleItem(db.Model):
         "Product"
     )
 
-    # StockBatchAllocation creates the batch_allocations
-    # relationship through its sale_item relationship.
+    # StockBatchAllocation defines the batch_allocations
+    # back-reference on this model.
 
     __table_args__ = (
 
@@ -227,87 +260,125 @@ class CashierSaleItem(db.Model):
             "buying_price IS NULL OR buying_price >= 0",
             name="ck_cashier_sale_item_buying_price_nonnegative"
         ),
+
     )
 
     def to_dict(self):
 
-        stock_quantity = (
-            Decimal(str(self.quantity))
-            if self.quantity is not None
-            else ZERO_QUANTITY
+        stock_quantity = decimal_value(
+            self.quantity,
+            ZERO_QUANTITY
         )
 
-        sale_quantity = (
-            Decimal(str(self.sale_quantity))
-            if self.sale_quantity is not None
-            else stock_quantity
+        sale_quantity = decimal_value(
+            self.sale_quantity,
+            stock_quantity
         )
 
-        price = (
-            Decimal(str(self.price))
-            if self.price is not None
-            else ZERO
-        )
+        price = decimal_value(self.price)
 
         buying_price = (
-            Decimal(str(self.buying_price))
+            decimal_value(self.buying_price)
             if self.buying_price is not None
             else None
         )
 
-        subtotal = (
-            price * sale_quantity
-        )
+        # ------------------------------------------------
+        # BATCH-AWARE CALCULATIONS
+        # ------------------------------------------------
 
-        # New calculation: use actual batch allocations.
-        allocations = getattr(
-            self,
-            "batch_allocations",
-            []
-        ) or []
+        allocations = list(
+            getattr(self, "batch_allocations", []) or []
+        )
 
         if allocations:
 
-            cost_of_goods_sold = sum(
-                (
-                    Decimal(str(allocation.cost))
-                    for allocation in allocations
-                ),
-                ZERO
+            # Revenue is the sum of revenue from the
+            # actual batches consumed by this sale.
+
+            subtotal = money(
+                sum(
+                    (
+                        decimal_value(allocation.revenue)
+                        for allocation in allocations
+                    ),
+                    ZERO
+                )
             )
 
-            allocated_revenue = sum(
-                (
-                    Decimal(str(allocation.revenue))
-                    for allocation in allocations
-                ),
-                ZERO
+            cost_of_goods_sold = money(
+                sum(
+                    (
+                        decimal_value(allocation.cost)
+                        for allocation in allocations
+                    ),
+                    ZERO
+                )
             )
 
-            gross_profit = (
-                allocated_revenue - cost_of_goods_sold
+            gross_profit = money(
+                subtotal - cost_of_goods_sold
             )
+
+            allocated_quantity = sum(
+                (
+                    decimal_value(
+                        allocation.quantity,
+                        ZERO_QUANTITY
+                    )
+                    for allocation in allocations
+                ),
+                ZERO_QUANTITY
+            )
+
+            # Exact weighted average BP and SP.
+
+            if allocated_quantity > ZERO:
+
+                buying_price = money(
+                    cost_of_goods_sold / allocated_quantity
+                )
+
+                if self.selling_unit == "unit":
+                    price = money(
+                        subtotal / sale_quantity
+                    )
+
+            # Expose the individual batch records so
+            # reports can inspect the exact historical prices.
+
+            batch_allocations = [
+                allocation.to_dict()
+                for allocation in allocations
+            ]
 
         else:
 
-            # Backward compatibility for historical sales
-            # that were created before batch tracking.
+            # ------------------------------------------------
+            # BACKWARD COMPATIBILITY FOR OLD SALES
+            # ------------------------------------------------
+
+            subtotal = money(
+                price * sale_quantity
+            )
+
             cost_of_goods_sold = (
-                buying_price * stock_quantity
+                money(buying_price * stock_quantity)
                 if buying_price is not None
                 else None
             )
 
             gross_profit = (
-                subtotal - cost_of_goods_sold
+                money(subtotal - cost_of_goods_sold)
                 if cost_of_goods_sold is not None
                 else None
             )
 
+            batch_allocations = []
+
         return {
 
             "id": self.id,
-
             "sale_id": self.sale_id,
 
             "product_id": self.product_id,
@@ -318,11 +389,18 @@ class CashierSaleItem(db.Model):
                 else None
             ),
 
+            # Stock-equivalent quantity consumed.
+
             "quantity": float(stock_quantity),
+
+            # Actual quantity sold to the customer.
 
             "sale_quantity": float(sale_quantity),
 
             "selling_unit": self.selling_unit,
+
+            # Weighted average prices for the sale line.
+            # Exact batch prices are in batch_allocations.
 
             "price": float(price),
 
@@ -346,11 +424,5 @@ class CashierSaleItem(db.Model):
                 else None
             ),
 
-            # New batch-level information.
-            "batch_allocations": [
-                allocation.to_dict()
-                for allocation in allocations
-            ],
-
-            "batch_count": len(allocations)
+            "batch_allocations": batch_allocations
         }
