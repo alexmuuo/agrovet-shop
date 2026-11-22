@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import api from "../../api/api.js";
+
 const MAX_QUANTITY = 1000000;
 const QUANTITY_DECIMAL_PLACES = 3;
 
@@ -14,163 +15,83 @@ function getAuthHeaders() {
 function formatQuantity(value) {
   const number = Number(value);
 
-  if (!Number.isFinite(number)) {
-    return value ?? "0";
-  }
+  if (!Number.isFinite(number)) return value ?? "0";
 
   return number.toLocaleString("en-KE", {
     minimumFractionDigits: 0,
-    maximumFractionDigits: QUANTITY_DECIMAL_PLACES,
+    maximumFractionDigits: 3,
     useGrouping: false,
   });
 }
 
-function getErrorMessage(error, operation = "loading inventory") {
+function formatMoney(value) {
+  const number = Number(value);
+
+  return Number.isFinite(number)
+    ? number.toLocaleString("en-KE", {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
+      })
+    : "0.00";
+}
+
+function createEmptyRow() {
+  return {
+    id: `${Date.now()}-${Math.random()}`,
+    product_id: "",
+    quantity: "",
+    buying_price: "",
+    selling_price: "",
+  };
+}
+
+function getErrorMessage(error, operation = "processing stock") {
   const status = error.response?.status;
-  const data = error.response?.data;
-  const serverMessage =
-    typeof data?.message === "string" ? data.message.trim() : "";
+  const message = error.response?.data?.message;
 
   if (!error.response) {
-    return (
-      `Network error while ${operation}. ` +
-      "No HTTP response was received. Check the API base URL, " +
-      "backend availability, and browser Network tab."
-    );
+    return `Network error while ${operation}. Check your connection and backend.`;
   }
 
   if (status === 401) {
-    return (
-      `Authentication failed while ${operation} (HTTP 401). ` +
-      "The cashier token may be missing, invalid, or expired. " +
-      "Log out and sign in again."
-    );
+    return "Your cashier session has expired. Please log in again.";
   }
 
   if (status === 403) {
-    return (
-      `Permission denied while ${operation} (HTTP 403). ` +
-      (serverMessage
-        ? `Backend message: ${serverMessage}`
-        : "The backend rejected the request without a message. " +
-          "Check the cashier's permissions and branch-validation logic.")
-    );
+    return message || "You do not have permission to perform this operation.";
   }
 
   if (status === 404) {
-    return (
-      `API endpoint not found while ${operation} (HTTP 404). ` +
-      "Check the API base URL, deployed backend version, and route registration."
-    );
+    return message || "The stock receiving endpoint was not found.";
   }
 
   if (status === 409) {
-    return (
-      `Conflict while ${operation} (HTTP 409). ` +
-      (serverMessage || "The request conflicts with the current inventory state.")
-    );
-  }
-
-  if (status === 422) {
-    return (
-      `Validation failed while ${operation} (HTTP 422). ` +
-      (serverMessage || "The backend rejected the supplied data.")
-    );
-  }
-
-  if (status === 429) {
-    return (
-      `Too many requests while ${operation} (HTTP 429). ` +
-      "Wait briefly before trying again."
-    );
+    return message || "The stock operation conflicts with the current inventory.";
   }
 
   if (status >= 500) {
-    return (
-      `Backend error while ${operation} (HTTP ${status}). ` +
-      (serverMessage ||
-        "The server failed without providing a useful error message. " +
-        "Inspect the deployed backend logs.")
-    );
+    return message || "The backend encountered an error while processing stock.";
   }
 
-  return (
-    `Request failed while ${operation} (HTTP ${status}). ` +
-    (serverMessage || "Inspect the browser Network tab for the response.")
-  );
-}
-
-function logDiagnostic(operation, error, extra = {}) {
-  console.error(`[Cashier Stock] ${operation}`, {
-    endpoint: error.config?.url || "Unknown endpoint",
-    method: error.config?.method?.toUpperCase() || "Unknown method",
-    httpStatus: error.response?.status ?? null,
-    responseData: error.response?.data ?? null,
-    responseHeaders: error.response?.headers ?? null,
-    errorMessage: error.message,
-    ...extra,
-  });
-}
-
-function getResponseProblem(data) {
-  if (!data || typeof data !== "object" || Array.isArray(data)) {
-    return (
-      "The inventory endpoint returned an invalid response. " +
-      "Expected a JSON object containing status, products, and branch."
-    );
-  }
-
-  if (data.status !== "success") {
-    return (
-      "The inventory endpoint returned an unexpected status. " +
-      `Received status: ${String(data.status ?? "missing")}. ` +
-      "Expected status: success."
-    );
-  }
-
-  if (!Array.isArray(data.products)) {
-    return (
-      "The inventory endpoint returned an invalid products field. " +
-      "Expected products to be an array."
-    );
-  }
-
-  if (!data.branch || typeof data.branch !== "object") {
-    const availableKeys = Object.keys(data).join(", ") || "none";
-
-    return (
-      "The inventory endpoint returned products but no valid branch object. " +
-      `Response fields received: ${availableKeys}. ` +
-      "Check the GET /cashier/stock/products response and its branch serialization."
-    );
-  }
-
-  if (data.branch.id == null || !data.branch.name) {
-    return (
-      "The inventory endpoint returned an incomplete branch object. " +
-      "The branch must include an id and name. " +
-      "Check the backend branch serializer."
-    );
-  }
-
-  return "";
+  return message || `Request failed with HTTP ${status}.`;
 }
 
 function CashierStock() {
   const [products, setProducts] = useState([]);
   const [branch, setBranch] = useState(null);
+
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
+
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
-  const [lastMovement, setLastMovement] = useState(null);
 
-  const [form, setForm] = useState({
-    product_id: "",
-    quantity: "",
-    reference: "",
-    notes: "",
-  });
+  const [receipt, setReceipt] = useState(null);
+
+  const [rows, setRows] = useState([createEmptyRow()]);
+
+  const [supplierReference, setSupplierReference] = useState("");
+  const [notes, setNotes] = useState("");
 
   const loadProducts = useCallback(async () => {
     setLoading(true);
@@ -182,38 +103,34 @@ function CashierStock() {
       });
 
       const data = response.data;
-      const responseProblem = getResponseProblem(data);
 
-      if (responseProblem) {
-        console.error("[Cashier Stock] Invalid inventory response", {
-          endpoint: "/cashier/stock/products",
-          httpStatus: response.status,
-          responseData: data,
-          responseHeaders: response.headers,
-          responseProblem,
-        });
-
-        setProducts([]);
-        setBranch(null);
-        setError(responseProblem);
-        return;
+      if (
+        !data ||
+        data.status !== "success" ||
+        !Array.isArray(data.products) ||
+        !data.branch ||
+        data.branch.id == null ||
+        !data.branch.name
+      ) {
+        throw new Error(
+          "The inventory endpoint returned an invalid response."
+        );
       }
 
       setProducts(data.products);
       setBranch(data.branch);
-
-      if (data.products.length === 0) {
-        setError(
-          "The assigned branch was confirmed, but its inventory contains no products. " +
-          "Check BranchProductStock records for this branch."
-        );
-      }
     } catch (err) {
-      logDiagnostic("Failed to load branch inventory", err);
+      console.error("[Cashier Stock] Inventory loading failed:", err);
 
       setProducts([]);
       setBranch(null);
-      setError(getErrorMessage(err, "loading branch inventory"));
+
+      setError(
+        err.response
+          ? getErrorMessage(err, "loading branch inventory")
+          : err.message ||
+              getErrorMessage(err, "loading branch inventory")
+      );
     } finally {
       setLoading(false);
     }
@@ -223,25 +140,139 @@ function CashierStock() {
     loadProducts();
   }, [loadProducts]);
 
-  const selectedProduct = useMemo(
-    () =>
-      products.find(
-        (product) =>
-          String(product.id) === String(form.product_id)
-      ),
-    [products, form.product_id]
-  );
-
-  const handleChange = (event) => {
-    const { name, value } = event.target;
-
-    setForm((previous) => ({
-      ...previous,
-      [name]: value,
-    }));
+  const updateRow = (rowId, field, value) => {
+    setRows((previous) =>
+      previous.map((row) =>
+        row.id === rowId
+          ? { ...row, [field]: value }
+          : row
+      )
+    );
 
     setError("");
     setSuccess("");
+  };
+
+  const addRow = () => {
+    setRows((previous) => [
+      ...previous,
+      createEmptyRow(),
+    ]);
+
+    setError("");
+    setSuccess("");
+  };
+
+  const removeRow = (rowId) => {
+    setRows((previous) =>
+      previous.length > 1
+        ? previous.filter((row) => row.id !== rowId)
+        : previous
+    );
+
+    setError("");
+    setSuccess("");
+  };
+
+  const getSelectedProduct = (row) =>
+    products.find(
+      (product) => String(product.id) === String(row.product_id)
+    );
+
+  const totalQuantity = useMemo(
+    () =>
+      rows.reduce(
+        (total, row) => total + (Number(row.quantity) || 0),
+        0
+      ),
+    [rows]
+  );
+
+  const totalBuyingValue = useMemo(
+    () =>
+      rows.reduce(
+        (total, row) =>
+          total +
+          (Number(row.quantity) || 0) *
+            (Number(row.buying_price) || 0),
+        0
+      ),
+    [rows]
+  );
+
+  const validateRows = () => {
+    if (!rows.length) {
+      return "Add at least one product.";
+    }
+
+    for (let index = 0; index < rows.length; index += 1) {
+      const row = rows[index];
+      const rowNumber = index + 1;
+
+      if (!row.product_id) {
+        return `Row ${rowNumber}: select a product.`;
+      }
+
+      const productId = Number(row.product_id);
+
+      if (!Number.isSafeInteger(productId) || productId <= 0) {
+        return `Row ${rowNumber}: invalid product selection.`;
+      }
+
+      const quantityText = String(row.quantity).trim();
+      const quantity = Number(quantityText);
+
+      if (
+        !quantityText ||
+        !Number.isFinite(quantity) ||
+        quantity <= 0 ||
+        quantity > MAX_QUANTITY
+      ) {
+        return `Row ${rowNumber}: enter a valid quantity greater than zero.`;
+      }
+
+      const decimalPart = quantityText.split(".")[1] || "";
+
+      if (decimalPart.length > QUANTITY_DECIMAL_PLACES) {
+        return `Row ${rowNumber}: quantity cannot have more than three decimal places.`;
+      }
+
+      const buyingPriceText = String(row.buying_price).trim();
+      const buyingPrice = Number(buyingPriceText);
+
+      if (
+        !buyingPriceText ||
+        !Number.isFinite(buyingPrice) ||
+        buyingPrice < 0
+      ) {
+        return `Row ${rowNumber}: enter a valid buying price.`;
+      }
+
+      const sellingPriceText = String(row.selling_price).trim();
+      const sellingPrice = Number(sellingPriceText);
+
+      if (
+        !sellingPriceText ||
+        !Number.isFinite(sellingPrice) ||
+        sellingPrice < 0
+      ) {
+        return `Row ${rowNumber}: enter a valid selling price.`;
+      }
+
+      if (!getSelectedProduct(row)) {
+        return `Row ${rowNumber}: selected product is not available in branch inventory.`;
+      }
+    }
+
+    if (supplierReference.trim().length > 100) {
+      return "Supplier reference cannot exceed 100 characters.";
+    }
+
+    if (notes.trim().length > 5000) {
+      return "Notes cannot exceed 5,000 characters.";
+    }
+
+    return "";
   };
 
   const handleSubmit = async (event) => {
@@ -249,101 +280,45 @@ function CashierStock() {
 
     setError("");
     setSuccess("");
-    setLastMovement(null);
+    setReceipt(null);
 
     if (!branch) {
-      setError(
-        "Stock addition stopped before sending a request: no valid branch " +
-        "was loaded. Resolve the inventory-loading error first."
-      );
+      setError("Your assigned branch could not be verified.");
       return;
     }
 
-    const productId = Number(form.product_id);
-    const quantityText = form.quantity.trim();
-    const quantity = Number(quantityText);
+    const validationError = validateRows();
 
-    if (!Number.isSafeInteger(productId) || productId <= 0) {
-      setError("Invalid product selection. Select a valid product.");
+    if (validationError) {
+      setError(validationError);
       return;
     }
 
-    if (
-      quantityText === "" ||
-      !Number.isFinite(quantity) ||
-      quantity <= 0
-    ) {
-      setError("Invalid quantity. Enter a number greater than zero.");
-      return;
-    }
+    const items = rows.map((row) => ({
+      product_id: Number(row.product_id),
+      quantity: Number(row.quantity),
+      buying_price: Number(row.buying_price),
+      selling_price: Number(row.selling_price),
+    }));
 
-    if (quantity > MAX_QUANTITY) {
-      setError("Quantity exceeds the maximum permitted value of 1,000,000.");
-      return;
-    }
-
-    const decimalPart = quantityText.split(".")[1] || "";
-
-    if (decimalPart.length > QUANTITY_DECIMAL_PLACES) {
-      setError(
-        "Quantity precision error. Use no more than three decimal places, " +
-        "for example 0.5, 1.25, or 2.375."
-      );
-      return;
-    }
-
-    if (form.reference.trim().length > 150) {
-      setError("Reference validation failed: maximum length is 150 characters.");
-      return;
-    }
-
-    if (form.notes.trim().length > 5000) {
-      setError("Notes validation failed: maximum length is 5,000 characters.");
-      return;
-    }
-
-    if (!selectedProduct) {
-      setError(
-        "Product selection error. The selected product is not present " +
-        "in the currently loaded branch inventory. Refresh and try again."
-      );
-      return;
-    }
-
-    const currentStock = Number(selectedProduct.stock);
-
-    if (!Number.isFinite(currentStock) || currentStock < 0) {
-      setError(
-        "Inventory data error. The selected product has an invalid stock quantity. " +
-        "Inspect its BranchProductStock record and backend serialization."
-      );
-      return;
-    }
-
-    const newStock = currentStock + quantity;
-
-    const confirmed = window.confirm(
-      `Add ${formatQuantity(quantity)} ${
-        selectedProduct.unit || "units"
-      } to ${selectedProduct.name} at ${branch.name}?\n\n` +
-      `Current branch stock: ${formatQuantity(currentStock)}\n` +
-      `New stock after addition: ${formatQuantity(newStock)}`
+    const confirmation = window.confirm(
+      `Receive ${items.length} product row(s) at ${branch.name}?\n\n` +
+        `Total quantity: ${formatQuantity(totalQuantity)}\n` +
+        `Total buying value: KSh ${formatMoney(totalBuyingValue)}\n\n` +
+        "Each row will be recorded as a separate stock batch."
     );
 
-    if (!confirmed) {
-      return;
-    }
+    if (!confirmation) return;
 
     setSubmitting(true);
 
     try {
       const response = await api.post(
-        "/cashier/stock/add",
+        "/cashier/stock/receive-batch",
         {
-          product_id: productId,
-          quantity,
-          reference: form.reference.trim(),
-          notes: form.notes.trim(),
+          items,
+          supplier_reference: supplierReference.trim(),
+          notes: notes.trim(),
         },
         {
           headers: getAuthHeaders(),
@@ -352,48 +327,39 @@ function CashierStock() {
 
       if (
         !response.data ||
-        typeof response.data !== "object" ||
-        response.data.status !== "success"
+        response.data.status !== "success" ||
+        !response.data.receipt
       ) {
-        console.error("[Cashier Stock] Unexpected stock-add response", {
-          endpoint: "/cashier/stock/add",
-          httpStatus: response.status,
-          responseData: response.data,
-        });
-
-        setError(
-          "The stock-add request returned HTTP " +
-          `${response.status}, but the response did not contain ` +
-          'the expected status "success". Verify the backend response ' +
-          "before attempting another addition."
+        throw new Error(
+          response.data?.message ||
+            "The server returned an invalid stock receipt response."
         );
-
-        return;
       }
+
+      setReceipt(response.data.receipt);
 
       setSuccess(
         response.data.message ||
-        "Stock addition was accepted by the backend."
+          "All stock entries were successfully received."
       );
 
-      setLastMovement(response.data.movement || null);
-
-      setForm({
-        product_id: "",
-        quantity: "",
-        reference: "",
-        notes: "",
-      });
+      setRows([createEmptyRow()]);
+      setSupplierReference("");
+      setNotes("");
 
       await loadProducts();
     } catch (err) {
-      logDiagnostic("Failed to add branch stock", err, {
-        productId,
-        quantity,
-        branchId: branch.id,
+      console.error("[Cashier Stock] Stock receiving failed:", {
+        status: err.response?.status,
+        response: err.response?.data,
+        message: err.message,
       });
 
-      setError(getErrorMessage(err, "adding branch stock"));
+      setError(
+        err.response
+          ? getErrorMessage(err, "receiving stock")
+          : err.message || "Unable to receive stock."
+      );
     } finally {
       setSubmitting(false);
     }
@@ -410,14 +376,15 @@ function CashierStock() {
           <h1 className="h2 fw-bold mb-2">Stock Management</h1>
 
           <p className="text-secondary mb-0">
-            Receive stock for your assigned branch and automatically
-            record who performed each addition.
+            Receive multiple products and record their individual
+            buying and selling prices.
           </p>
 
           {branch && (
             <div className="alert alert-info mt-3 mb-0">
               <i className="bi bi-shop me-2" />
-              Managing inventory for <strong>{branch.name}</strong>
+              Managing inventory for{" "}
+              <strong>{branch.name}</strong>
               {branch.code ? ` (${branch.code})` : ""}.
             </div>
           )}
@@ -448,356 +415,431 @@ function CashierStock() {
         </div>
       )}
 
-      {lastMovement && (
+      {receipt && (
         <div className="card border-success shadow-sm mb-4">
-          <div className="card-body">
-            <h2 className="h6 fw-bold text-success">
-              <i className="bi bi-check-circle-fill me-2" />
-              Stock Addition Recorded
-            </h2>
+          <div className="card-body p-4">
+            <div className="d-flex justify-content-between flex-wrap gap-2 mb-3">
+              <div>
+                <h2 className="h5 fw-bold text-success mb-1">
+                  Stock Receipt Successful
+                </h2>
 
-            <div className="row g-3">
-              <div className="col-6 col-md-3">
-                <div className="small text-secondary">Product</div>
-                <div className="fw-semibold">
-                  {lastMovement.product_name || "—"}
-                </div>
+                <p className="text-secondary small mb-0">
+                  Reference: {receipt.reference}
+                </p>
               </div>
 
-              <div className="col-6 col-md-3">
-                <div className="small text-secondary">Previous Stock</div>
-                <div className="fw-semibold">
-                  {formatQuantity(lastMovement.previous_stock)}
-                </div>
-              </div>
-
-              <div className="col-6 col-md-3">
-                <div className="small text-secondary">Quantity Added</div>
-                <div className="fw-semibold text-success">
-                  +{formatQuantity(lastMovement.quantity_added)}
-                </div>
-              </div>
-
-              <div className="col-6 col-md-3">
-                <div className="small text-secondary">New Stock</div>
-                <div className="fw-semibold">
-                  {formatQuantity(lastMovement.new_stock)}
-                </div>
-              </div>
+              <span className="badge text-bg-success align-self-start">
+                {receipt.number_of_rows} product rows
+              </span>
             </div>
 
-            {branch && (
-              <p className="small text-secondary mt-3 mb-0">
-                Branch: {branch.name}
-              </p>
-            )}
+            <div className="table-responsive">
+              <table className="table table-sm table-hover align-middle">
+                <thead className="table-light">
+                  <tr>
+                    <th>Product</th>
+                    <th>Quantity</th>
+                    <th>BP</th>
+                    <th>SP</th>
+                    <th>New Stock</th>
+                  </tr>
+                </thead>
+
+                <tbody>
+                  {receipt.items?.map((item, index) => (
+                    <tr key={`${item.product_id}-${index}`}>
+                      <td className="fw-semibold">
+                        {item.product_name}
+                      </td>
+                      <td>
+                        {formatQuantity(item.quantity_received)}
+                      </td>
+                      <td>KSh {formatMoney(item.buying_price)}</td>
+                      <td>KSh {formatMoney(item.selling_price)}</td>
+                      <td className="text-success fw-semibold">
+                        {formatQuantity(item.new_stock)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            <p className="small text-secondary mb-0">
+              Branch: {receipt.branch_name}
+            </p>
           </div>
         </div>
       )}
 
-      <div className="row g-4">
-        <div className="col-12 col-lg-7">
-          <div className="card border-0 shadow-sm h-100">
-            <div className="card-body p-4">
-              <h2 className="h5 fw-bold mb-4">
+      <div className="card border-0 shadow-sm">
+        <div className="card-body p-3 p-md-4">
+          <div className="d-flex flex-wrap justify-content-between align-items-center gap-3 mb-4">
+            <div>
+              <h2 className="h5 fw-bold mb-1">
                 <i className="bi bi-box-seam text-success me-2" />
-                Record Stock Received
+                Receive New Stock
               </h2>
 
-              {loading ? (
-                <div className="text-center py-5">
-                  <div className="spinner-border text-success" role="status">
-                    <span className="visually-hidden">
-                      Loading products...
-                    </span>
-                  </div>
+              <p className="text-secondary small mb-0">
+                Add every product delivered before submitting the receipt.
+              </p>
+            </div>
 
-                  <p className="text-secondary mt-3 mb-0">
-                    Loading your branch inventory...
-                  </p>
-                </div>
-              ) : !branch ? (
-                <div className="alert alert-warning mb-0">
-                  <i className="bi bi-exclamation-triangle me-2" />
-                  Inventory loading failed. Read the detailed error above
-                  to identify whether authentication, branch resolution,
-                  response formatting, or the backend is responsible.
-                </div>
-              ) : products.length === 0 ? (
-                <div className="alert alert-info mb-0">
-                  Your branch was confirmed, but no products are available
-                  in its inventory.
-                </div>
-              ) : (
-                <form onSubmit={handleSubmit}>
-                  <div className="mb-3">
-                    <label
-                      htmlFor="stockProduct"
-                      className="form-label fw-semibold"
-                    >
-                      Product <span className="text-danger">*</span>
-                    </label>
+            <button
+              type="button"
+              className="btn btn-outline-success"
+              onClick={addRow}
+              disabled={loading || submitting || products.length === 0}
+            >
+              <i className="bi bi-plus-lg me-2" />
+              Add Product
+            </button>
+          </div>
 
-                    <select
-                      id="stockProduct"
-                      name="product_id"
-                      className="form-select"
-                      value={form.product_id}
-                      onChange={handleChange}
-                      required
-                      disabled={submitting}
-                    >
-                      <option value="">Select a product</option>
+          {loading ? (
+            <div className="text-center py-5">
+              <div className="spinner-border text-success" />
 
-                      {products.map((product) => (
-                        <option key={product.id} value={product.id}>
-                          {product.name} — Stock:{" "}
-                          {formatQuantity(product.stock)}{" "}
-                          {product.unit || ""}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
+              <p className="text-secondary mt-3 mb-0">
+                Loading branch inventory...
+              </p>
+            </div>
+          ) : !branch ? (
+            <div className="alert alert-warning">
+              Your branch inventory could not be loaded.
+            </div>
+          ) : products.length === 0 ? (
+            <div className="alert alert-info">
+              No products are available in your branch inventory.
+            </div>
+          ) : (
+            <form onSubmit={handleSubmit}>
+              {rows.map((row, index) => {
+                const selectedProduct = getSelectedProduct(row);
 
-                  {selectedProduct && (
-                    <div className="rounded bg-light p-3 mb-3">
-                      <div className="d-flex justify-content-between gap-3">
-                        <span className="text-secondary">
-                          Current branch stock
-                        </span>
+                const currentStock = Number(
+                  selectedProduct?.stock || 0
+                );
 
-                        <strong>
-                          {formatQuantity(selectedProduct.stock)}{" "}
-                          {selectedProduct.unit || ""}
-                        </strong>
+                const quantity = Number(row.quantity) || 0;
+
+                return (
+                  <div
+                    key={row.id}
+                    className="border rounded-3 p-3 mb-3"
+                  >
+                    <div className="d-flex justify-content-between align-items-center mb-3">
+                      <h3 className="h6 fw-bold mb-0">
+                        Product {index + 1}
+                      </h3>
+
+                      {rows.length > 1 && (
+                        <button
+                          type="button"
+                          className="btn btn-sm btn-outline-danger"
+                          onClick={() => removeRow(row.id)}
+                          disabled={submitting}
+                        >
+                          <i className="bi bi-trash me-1" />
+                          Remove
+                        </button>
+                      )}
+                    </div>
+
+                    <div className="row g-3">
+                      <div className="col-12">
+                        <label className="form-label fw-semibold">
+                          Product *
+                        </label>
+
+                        <select
+                          className="form-select"
+                          value={row.product_id}
+                          onChange={(event) =>
+                            updateRow(
+                              row.id,
+                              "product_id",
+                              event.target.value
+                            )
+                          }
+                          required
+                          disabled={submitting}
+                        >
+                          <option value="">Select a product</option>
+
+                          {products.map((product) => (
+                            <option
+                              key={product.id}
+                              value={product.id}
+                            >
+                              {product.name} — Stock:{" "}
+                              {formatQuantity(product.stock)}{" "}
+                              {product.unit || ""}
+                            </option>
+                          ))}
+                        </select>
                       </div>
 
-                      <div className="d-flex justify-content-between gap-3 mt-2">
-                        <span className="text-secondary">Category</span>
-                        <span className="fw-semibold">
-                          {selectedProduct.category || "Uncategorized"}
-                        </span>
-                      </div>
-
-                      <div className="d-flex justify-content-between gap-3 mt-2">
-                        <span className="text-secondary">Branch</span>
-                        <span className="fw-semibold">{branch.name}</span>
-                      </div>
-
-                      {form.quantity !== "" &&
-                        Number.isFinite(Number(form.quantity)) &&
-                        Number(form.quantity) > 0 && (
-                          <div className="d-flex justify-content-between gap-3 mt-2 pt-2 border-top">
+                      {selectedProduct && (
+                        <div className="col-12">
+                          <div className="bg-light rounded p-2 small">
                             <span className="text-secondary">
-                              Stock after addition
+                              Current branch stock:{" "}
                             </span>
 
-                            <strong className="text-success">
-                              {formatQuantity(
-                                Number(selectedProduct.stock || 0) +
-                                  Number(form.quantity)
-                              )}{" "}
+                            <strong>
+                              {formatQuantity(currentStock)}{" "}
                               {selectedProduct.unit || ""}
                             </strong>
+
+                            {quantity > 0 && (
+                              <>
+                                <span className="text-secondary mx-2">
+                                  →
+                                </span>
+
+                                <span className="text-success fw-semibold">
+                                  {formatQuantity(currentStock + quantity)}{" "}
+                                  {selectedProduct.unit || ""}
+                                </span>
+                              </>
+                            )}
+                          </div>
+                        </div>
+                      )}
+
+                      <div className="col-12 col-md-4">
+                        <label className="form-label fw-semibold">
+                          Quantity Received *
+                        </label>
+
+                        <input
+                          type="number"
+                          className="form-control"
+                          min="0.001"
+                          max={MAX_QUANTITY}
+                          step="0.001"
+                          inputMode="decimal"
+                          placeholder="e.g. 10.5"
+                          value={row.quantity}
+                          onChange={(event) =>
+                            updateRow(
+                              row.id,
+                              "quantity",
+                              event.target.value
+                            )
+                          }
+                          required
+                          disabled={submitting}
+                        />
+                      </div>
+
+                      <div className="col-12 col-md-4">
+                        <label className="form-label fw-semibold">
+                          Buying Price (KSh) *
+                        </label>
+
+                        <input
+                          type="number"
+                          className="form-control"
+                          min="0"
+                          step="0.01"
+                          placeholder="e.g. 350"
+                          value={row.buying_price}
+                          onChange={(event) =>
+                            updateRow(
+                              row.id,
+                              "buying_price",
+                              event.target.value
+                            )
+                          }
+                          required
+                          disabled={submitting}
+                        />
+                      </div>
+
+                      <div className="col-12 col-md-4">
+                        <label className="form-label fw-semibold">
+                          Selling Price (KSh) *
+                        </label>
+
+                        <input
+                          type="number"
+                          className="form-control"
+                          min="0"
+                          step="0.01"
+                          placeholder="e.g. 450"
+                          value={row.selling_price}
+                          onChange={(event) =>
+                            updateRow(
+                              row.id,
+                              "selling_price",
+                              event.target.value
+                            )
+                          }
+                          required
+                          disabled={submitting}
+                        />
+                      </div>
+
+                      {row.quantity &&
+                        row.buying_price &&
+                        Number(row.quantity) > 0 && (
+                          <div className="col-12">
+                            <div className="small text-secondary">
+                              Batch buying value:{" "}
+                              <strong className="text-dark">
+                                KSh{" "}
+                                {formatMoney(
+                                  Number(row.quantity) *
+                                    Number(row.buying_price)
+                                )}
+                              </strong>
+                            </div>
                           </div>
                         )}
                     </div>
-                  )}
-
-                  <div className="mb-3">
-                    <label
-                      htmlFor="stockQuantity"
-                      className="form-label fw-semibold"
-                    >
-                      Quantity Received{" "}
-                      <span className="text-danger">*</span>
-                    </label>
-
-                    <input
-                      id="stockQuantity"
-                      name="quantity"
-                      type="number"
-                      className="form-control"
-                      min="0.001"
-                      max={MAX_QUANTITY}
-                      step="0.001"
-                      inputMode="decimal"
-                      placeholder="e.g. 0.5, 1, 1.25"
-                      value={form.quantity}
-                      onChange={handleChange}
-                      required
-                      disabled={submitting}
-                    />
-
-                    <div className="form-text">
-                      Enter a positive quantity with up to three decimal
-                      places, for example 0.5, 1.25 or 2.375.
-                    </div>
                   </div>
+                );
+              })}
+
+              <div className="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-4">
+                <button
+                  type="button"
+                  className="btn btn-outline-success"
+                  onClick={addRow}
+                  disabled={submitting}
+                >
+                  <i className="bi bi-plus-circle me-2" />
+                  Add Another Product
+                </button>
+
+                <span className="badge text-bg-light border text-dark">
+                  {rows.length} product row(s)
+                </span>
+              </div>
+
+              <div className="card bg-light border-0 mb-4">
+                <div className="card-body">
+                  <h3 className="h6 fw-bold mb-3">
+                    Delivery Information
+                  </h3>
 
                   <div className="mb-3">
-                    <label
-                      htmlFor="stockReference"
-                      className="form-label fw-semibold"
-                    >
+                    <label className="form-label fw-semibold">
                       Supplier / Delivery Reference
                     </label>
 
                     <input
-                      id="stockReference"
-                      name="reference"
                       type="text"
                       className="form-control"
-                      maxLength="150"
+                      maxLength="100"
                       placeholder="e.g. SUP-2026-001"
-                      value={form.reference}
-                      onChange={handleChange}
+                      value={supplierReference}
+                      onChange={(event) =>
+                        setSupplierReference(event.target.value)
+                      }
                       disabled={submitting}
                     />
                   </div>
 
-                  <div className="mb-4">
-                    <label
-                      htmlFor="stockNotes"
-                      className="form-label fw-semibold"
-                    >
+                  <div>
+                    <label className="form-label fw-semibold">
                       Notes
                     </label>
 
                     <textarea
-                      id="stockNotes"
-                      name="notes"
                       className="form-control"
                       rows="3"
                       maxLength="5000"
-                      placeholder="Optional notes about the delivery..."
-                      value={form.notes}
-                      onChange={handleChange}
+                      placeholder="Optional delivery notes..."
+                      value={notes}
+                      onChange={(event) =>
+                        setNotes(event.target.value)
+                      }
                       disabled={submitting}
                     />
                   </div>
+                </div>
+              </div>
 
-                  <div className="alert alert-warning small">
-                    <i className="bi bi-shield-check me-2" />
-                    Stock additions are validated by the backend and
-                    recorded against the authenticated cashier.
+              <div className="card border-success mb-4">
+                <div className="card-body">
+                  <h3 className="h6 fw-bold mb-3">
+                    Receipt Summary
+                  </h3>
+
+                  <div className="d-flex justify-content-between mb-2">
+                    <span className="text-secondary">
+                      Product rows
+                    </span>
+
+                    <strong>{rows.length}</strong>
                   </div>
 
-                  <button
-                    type="submit"
-                    className="btn btn-success w-100 py-2"
-                    disabled={submitting || !selectedProduct}
-                  >
-                    {submitting ? (
-                      <>
-                        <span
-                          className="spinner-border spinner-border-sm me-2"
-                          role="status"
-                          aria-hidden="true"
-                        />
-                        Recording Stock...
-                      </>
-                    ) : (
-                      <>
-                        <i className="bi bi-plus-circle me-2" />
-                        Add Stock
-                      </>
-                    )}
-                  </button>
-                </form>
-              )}
-            </div>
-          </div>
-        </div>
+                  <div className="d-flex justify-content-between mb-2">
+                    <span className="text-secondary">
+                      Total quantity
+                    </span>
 
-        <div className="col-12 col-lg-5">
-          <div className="card border-0 shadow-sm mb-4">
-            <div className="card-body p-4">
-              <h2 className="h5 fw-bold mb-3">
-                <i className="bi bi-shield-check text-success me-2" />
-                Stock Accountability
-              </h2>
+                    <strong>{formatQuantity(totalQuantity)}</strong>
+                  </div>
 
-              <ul className="list-unstyled mb-0">
-                <li className="d-flex gap-2 mb-3">
-                  <i className="bi bi-check-circle-fill text-success mt-1" />
-                  <span>
-                    Each addition is linked to the authenticated cashier.
-                  </span>
-                </li>
+                  <div className="d-flex justify-content-between">
+                    <span className="text-secondary">
+                      Total buying value
+                    </span>
 
-                <li className="d-flex gap-2 mb-3">
-                  <i className="bi bi-check-circle-fill text-success mt-1" />
-                  <span>
-                    Previous and new stock quantities are recorded.
-                  </span>
-                </li>
+                    <strong className="text-success">
+                      KSh {formatMoney(totalBuyingValue)}
+                    </strong>
+                  </div>
+                </div>
+              </div>
 
-                <li className="d-flex gap-2 mb-3">
-                  <i className="bi bi-check-circle-fill text-success mt-1" />
-                  <span>
-                    Supplier references and notes can be saved.
-                  </span>
-                </li>
+              <div className="alert alert-warning small">
+                <i className="bi bi-shield-check me-2" />
+                Every product row will create a separate stock batch
+                with its own buying and selling prices. All rows are
+                submitted together in one transaction.
+              </div>
 
-                <li className="d-flex gap-2">
-                  <i className="bi bi-check-circle-fill text-success mt-1" />
-                  <span>
-                    Failed transactions should be rolled back by the backend.
-                  </span>
-                </li>
-              </ul>
-            </div>
-          </div>
-
-          <div className="card border-0 shadow-sm">
-            <div className="card-body p-4">
-              <h2 className="h5 fw-bold mb-2">
-                <i className="bi bi-clock-history text-success me-2" />
-                Stock History
-              </h2>
-
-              <p className="text-secondary mb-3">
-                Review previous stock additions, quantities, timestamps,
-                and references.
-              </p>
-
-              <a
-                href="/cashier/stock-history"
-                className="btn btn-outline-success w-100"
+              <button
+                type="submit"
+                className="btn btn-success btn-lg w-100"
+                disabled={submitting || !branch}
               >
-                View My Stock History
-                <i className="bi bi-arrow-right ms-2" />
-              </a>
-            </div>
-          </div>
+                {submitting ? (
+                  <>
+                    <span className="spinner-border spinner-border-sm me-2" />
+                    Receiving Stock...
+                  </>
+                ) : (
+                  <>
+                    <i className="bi bi-check-circle me-2" />
+                    Add New Stock
+                  </>
+                )}
+              </button>
+            </form>
+          )}
         </div>
       </div>
 
       <div className="card border-0 shadow-sm mt-4">
         <div className="card-body p-4">
-          <div className="d-flex flex-wrap justify-content-between align-items-center gap-3 mb-3">
-            <div>
-              <h2 className="h5 fw-bold mb-1">Current Branch Stock</h2>
-
-              <p className="text-secondary small mb-0">
-                Inventory quantities for active products at your assigned
-                branch.
-              </p>
-            </div>
-
-            <span className="badge text-bg-success">
-              {products.length} products
-            </span>
-          </div>
+          <h2 className="h5 fw-bold mb-3">
+            <i className="bi bi-boxes text-success me-2" />
+            Current Branch Stock
+          </h2>
 
           {loading ? (
-            <p className="text-secondary mb-0">
-              Loading branch inventory...
-            </p>
+            <p className="text-secondary">Loading inventory...</p>
           ) : products.length === 0 ? (
-            <p className="text-secondary mb-0">
-              No branch inventory is currently available.
+            <p className="text-secondary">
+              No inventory available.
             </p>
           ) : (
             <div className="table-responsive">
@@ -814,8 +856,12 @@ function CashierStock() {
                 <tbody>
                   {products.map((product) => (
                     <tr key={product.id}>
-                      <td className="fw-semibold">{product.name}</td>
+                      <td className="fw-semibold">
+                        {product.name}
+                      </td>
+
                       <td>{product.category || "—"}</td>
+
                       <td>
                         <span
                           className={`badge ${
@@ -827,6 +873,7 @@ function CashierStock() {
                           {formatQuantity(product.stock)}
                         </span>
                       </td>
+
                       <td>{product.unit || "—"}</td>
                     </tr>
                   ))}
@@ -841,4 +888,3 @@ function CashierStock() {
 }
 
 export default CashierStock;
-
