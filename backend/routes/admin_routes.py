@@ -2379,6 +2379,8 @@ def get_branch_pos_sales(branch_id):
             .options(
                 selectinload(CashierSale.items)
                     .selectinload(CashierSaleItem.product),
+                selectinload(CashierSale.items)
+                    .selectinload(CashierSaleItem.batch_allocations),
                 selectinload(CashierSale.branch),
                 selectinload(CashierSale.cashier),
             )
@@ -2599,9 +2601,11 @@ def get_pos_item_financials(item):
     revenue = selling_price * sale_quantity
 
     # Allocations are the authoritative source when present.
-    allocations = StockBatchAllocation.query.filter_by(
-        sale_item_id=item.id
-    ).order_by(StockBatchAllocation.id.asc()).all()
+    # Batch allocations are eagerly loaded by get_pos_report_items().
+    # Reading the relationship here avoids one database query per sale item.
+    allocations = list(
+        getattr(item, "batch_allocations", []) or []
+    )
     active_allocations = [
         allocation for allocation in allocations
         if not bool(getattr(allocation, "is_restored", False))
@@ -2676,7 +2680,9 @@ def get_pos_report_items(sales):
     if not sale_ids:
         return []
 
-    return CashierSaleItem.query.filter(
+    return CashierSaleItem.query.options(
+        selectinload(CashierSaleItem.batch_allocations)
+    ).filter(
         CashierSaleItem.sale_id.in_(sale_ids)
     ).order_by(
         CashierSaleItem.id.asc()
@@ -3589,6 +3595,8 @@ def get_all_admin_pos_sales():
             .options(
                 selectinload(CashierSale.items)
                     .selectinload(CashierSaleItem.product),
+                selectinload(CashierSale.items)
+                    .selectinload(CashierSaleItem.batch_allocations),
                 selectinload(CashierSale.branch),
                 selectinload(CashierSale.cashier),
             )
