@@ -152,7 +152,9 @@ def allocate_stock_from_batches(
     required_quantity,
     selling_unit,
     sale_quantity,
-    selling_price
+    selling_price,
+    branch_stock_quantity,
+    cashier_id
 ):
     """
     Consume stock from the oldest available batches first.
@@ -192,11 +194,106 @@ def allocate_stock_from_batches(
         ZERO
     )
 
-    if available < required_quantity:
+    # Backward-compatible migration for live installations:
+    # branch stock may pre-date batch tracking. Convert only the
+    # untracked balance into a clearly labelled batch, without
+    # changing BranchProductStock or creating a second stock-in.
+    #
+    # Existing batches and their historical prices remain untouched.
+    branch_available = Decimal(str(branch_stock_quantity or ZERO)).quantize(
+        QUANTITY_PLACES
+    )
+
+    if available > branch_available:
         raise ValueError(
-            f"Batch stock mismatch for {product.name}. "
-            f"Available in batches: {available:.3f}; "
-            f"required: {required_quantity:.3f}."
+            f"Batch records for {product.name} exceed its branch stock. "
+            "Stock reconciliation is required before this sale."
+        )
+
+    if available < required_quantity:
+        if branch_available < required_quantity:
+            raise ValueError(
+                f"Insufficient branch stock for {product.name}. "
+                f"Available: {branch_available:.3f}; "
+                f"required: {required_quantity:.3f}."
+            )
+
+        if available > branch_available:
+            raise ValueError(
+                f"Batch records for {product.name} exceed its branch stock. "
+                "Stock reconciliation is required before this sale."
+            )
+
+        untracked_quantity = (
+            branch_available - available
+        ).quantize(QUANTITY_PLACES)
+
+        if untracked_quantity < (required_quantity - available):
+            raise ValueError(
+                f"Legacy stock reconciliation failed for {product.name}. "
+                "No sale changes were saved."
+            )
+
+        legacy_buying_price = validate_price(
+            getattr(product, "buying_price", None)
+        )
+        legacy_selling_price = validate_price(
+            getattr(product, "price", None)
+        )
+
+        if legacy_buying_price is None:
+            raise ValueError(
+                f"{product.name} has legacy stock without batch records, "
+                "but its catalogue buying price is missing. Add a buying "
+                "price before selling this legacy stock."
+            )
+
+        if legacy_selling_price is None:
+            raise ValueError(
+                f"{product.name} has legacy stock without batch records, "
+                "but its catalogue selling price is invalid."
+            )
+
+        legacy_reference = (
+            f"LEGACY-SALE-{uuid.uuid4().hex[:12].upper()}"
+        )
+
+        legacy_batch = StockBatch(
+            reference=legacy_reference,
+            product_id=product.id,
+            branch_id=branch_id,
+            cashier_id=cashier_id,
+            quantity_received=untracked_quantity,
+            remaining_quantity=untracked_quantity,
+            buying_price=legacy_buying_price,
+            selling_price=legacy_selling_price,
+            supplier_reference=(
+                "LEGACY_CONVERSION;SOURCE:PRE_BATCH_BRANCH_STOCK;"
+                "PRICES:CATALOGUE_SNAPSHOT"
+            ),
+            notes=(
+                "Legacy branch stock converted to batch tracking "
+                "during a cashier sale. Existing branch stock was "
+                "not increased. Buying and selling prices are "
+                "catalogue snapshots, not verified historical prices. "
+                f"Conversion initiated by cashier #{cashier_id}."
+            ),
+        )
+
+        db.session.add(legacy_batch)
+        db.session.flush()
+
+        batches.append(legacy_batch)
+        available += untracked_quantity
+
+        logger.info(
+            "Converted legacy stock to batch: product_id=%s, "
+            "branch_id=%s, batch_id=%s, quantity=%s, cashier_id=%s",
+            product.id,
+            branch_id,
+            legacy_batch.id,
+            untracked_quantity,
+            cashier_id,
         )
 
     remaining = required_quantity
@@ -701,7 +798,9 @@ def create_cashier_sale():
                     item["price"]
                     if item["price"] is not None
                     else ZERO
-                )
+                ),
+                branch_stock_quantity=item["stock"].quantity,
+                cashier_id=cashier.id
             )
 
             # -----------------------------------------------
