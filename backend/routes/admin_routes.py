@@ -5041,6 +5041,12 @@ def get_stock_transfers():
                         "selling_price": float(batch.selling_price or 0),
                         "reference": batch.reference,
                         "supplier_reference": batch.supplier_reference,
+                        "legacy_conversion": "LEGACY_CONVERSION" in str(batch.supplier_reference or ""),
+                        "costing_source": (
+                            "PRODUCT_CATALOGUE_SNAPSHOT"
+                            if "CATALOGUE_PRICE_SNAPSHOT" in str(batch.supplier_reference or "")
+                            else "ORIGINAL_SOURCE_BATCH"
+                        ),
                     })
 
                 item_data["batch_transfers"] = batch_transfers
@@ -5103,8 +5109,12 @@ def get_stock_transfers():
 @admin_required
 def create_stock_transfer():
     """
-    Transfer stock between branches using an explicitly selected
-    source product and destination product for every line item.
+    Transfer stock between branches using explicitly selected products.
+
+    Existing batch records move FIFO with their original BP/SP. If branch
+    stock predates batch tracking, only the untracked quantity being moved
+    is represented by labelled legacy-conversion batches. Existing sales,
+    stock movements, and branch quantities are never rewritten or double-added.
 
     Required payload:
     {
@@ -5307,15 +5317,18 @@ def create_stock_transfer():
                  for batch in source_batches),
                 Decimal("0.000")
             )
-            if batch_available < quantity:
-                raise ValueError(
-                    f"Batch records for '{source_product.name}' are short. "
-                    f"Branch stock says {source_previous:.3f}, but only "
-                    f"{batch_available:.3f} is batch-tracked. Reconcile "
-                    "legacy/opening stock before transferring. No changes saved."
-                )
 
-            batch_remaining = quantity
+            # A live legacy installation can legitimately have branch stock
+            # created before batch tracking was introduced. Never rewrite
+            # old sales, movements, or stock totals to manufacture history.
+            # Move available tracked batches first, then create a clearly
+            # labelled zero-remaining source conversion batch for only the
+            # untracked portion of this transfer. This is audit lineage, not
+            # an additional stock-in, so branch quantities are changed once.
+            tracked_to_move = min(quantity, batch_available)
+            legacy_to_move = quantity - tracked_to_move
+
+            batch_remaining = tracked_to_move
             moved_batches = []
             for source_batch in source_batches:
                 if batch_remaining <= Decimal("0.000"):
@@ -5339,9 +5352,8 @@ def create_stock_transfer():
                     selling_price=source_batch.selling_price,
                     supplier_reference=(
                         f"TRANSFER:{transfer.reference};"
-                        f"SOURCE_PRODUCT_ID:{source_product_id}; "
-                        f"SOURCE_BATCH:{source_batch.id}; "
-                        f"ORIGINAL_SUPPLIER_REF:{source_batch.supplier_reference or ''}"
+                        f"SOURCE_PRODUCT_ID:{source_product_id};"
+                        f"SOURCE_BATCH:{source_batch.id}"
                     )[:150],
                     notes=(
                         f"Transferred from batch #{source_batch.id} "
@@ -5359,11 +5371,118 @@ def create_stock_transfer():
                     "buying_price": float(source_batch.buying_price),
                     "selling_price": float(source_batch.selling_price),
                     "original_batch_reference": source_batch.reference,
+                    "legacy_conversion": False,
                 })
                 batch_remaining -= moved_quantity
 
             if batch_remaining > Decimal("0.000"):
-                raise ValueError("Unable to allocate the complete transfer across source batches.")
+                raise ValueError("Unable to allocate the tracked portion of this transfer.")
+
+            if legacy_to_move > Decimal("0.000"):
+                # Catalogue prices are snapshots for this conversion only.
+                # They are explicitly marked as estimated legacy costing;
+                # they are not represented as verified historical prices.
+                legacy_buying_price = source_product.buying_price
+                legacy_selling_price = source_product.price
+                if legacy_buying_price is None or legacy_selling_price is None:
+                    raise ValueError(
+                        f"'{source_product.name}' has untracked stock, but its "
+                        "catalogue buying or selling price is missing. Add the "
+                        "missing catalogue price before transferring this legacy stock."
+                    )
+
+                legacy_buying_price = Decimal(str(legacy_buying_price)).quantize(Decimal("0.01"))
+                legacy_selling_price = Decimal(str(legacy_selling_price)).quantize(Decimal("0.01"))
+                if legacy_buying_price < Decimal("0.00") or legacy_selling_price < Decimal("0.00"):
+                    raise ValueError("Catalogue prices for legacy stock cannot be negative.")
+
+                # StockBatch.cashier_id is required by the existing schema.
+                # Attribute the conversion to a real cashier from the most
+                # recent historical stock-in movement for this exact SKU
+                # and branch. Do not invent a cashier identity.
+                legacy_receipt_movement = (
+                    StockMovement.query
+                    .filter(
+                        StockMovement.branch_id == source_branch_id,
+                        StockMovement.product_id == source_product_id,
+                        StockMovement.movement_type == "STOCK_IN",
+                        StockMovement.cashier_id.isnot(None),
+                    )
+                    .order_by(StockMovement.created_at.desc(), StockMovement.id.desc())
+                    .first()
+                )
+                legacy_cashier = (
+                    Cashier.query.get(legacy_receipt_movement.cashier_id)
+                    if legacy_receipt_movement else None
+                )
+                if legacy_cashier is None:
+                    raise ValueError(
+                        f"'{source_product.name}' has untracked legacy stock, but "
+                        "there is no historical stock-in cashier to attribute its "
+                        "conversion to. No transfer changes were saved."
+                    )
+
+                legacy_source_batch = StockBatch(
+                    reference=f"LEGACY-{transfer.reference}"[:80],
+                    product_id=source_product_id,
+                    branch_id=source_branch_id,
+                    cashier_id=legacy_cashier.id,
+                    quantity_received=legacy_to_move,
+                    remaining_quantity=Decimal("0.000"),
+                    buying_price=legacy_buying_price,
+                    selling_price=legacy_selling_price,
+                    supplier_reference=(
+                        f"LEGACY_CONVERSION;TRANSFER:{transfer.reference};"
+                        f"SOURCE_PRODUCT_ID:{source_product_id}"
+                    )[:150],
+                    notes=(
+                        "Legacy stock converted to batch lineage during an "
+                        "interbranch transfer. This conversion does not change "
+                        "branch stock a second time. Buying and selling prices "
+                        "are catalogue snapshots, not verified historical prices. "
+                        f"Attribution uses historical STOCK_IN movement "
+                        f"#{legacy_receipt_movement.id}; transfer {transfer.reference}."
+                    )[:2000],
+                )
+                db.session.add(legacy_source_batch)
+                db.session.flush()
+
+                legacy_destination_batch = StockBatch(
+                    reference=legacy_source_batch.reference,
+                    product_id=destination_product_id,
+                    branch_id=destination_branch_id,
+                    cashier_id=legacy_cashier.id,
+                    quantity_received=legacy_to_move,
+                    remaining_quantity=legacy_to_move,
+                    buying_price=legacy_buying_price,
+                    selling_price=legacy_selling_price,
+                    supplier_reference=(
+                        f"TRANSFER:{transfer.reference};"
+                        f"SOURCE_PRODUCT_ID:{source_product_id};"
+                        f"SOURCE_BATCH:{legacy_source_batch.id};"
+                        "LEGACY_CONVERSION;CATALOGUE_PRICE_SNAPSHOT"
+                    )[:150],
+                    notes=(
+                        f"Legacy stock transferred from {source_branch.name} "
+                        f"to {destination_branch.name}. Source conversion batch "
+                        f"#{legacy_source_batch.id}. BP/SP are catalogue snapshots, "
+                        "not verified historical prices. No additional branch "
+                        f"stock was created. Transfer {transfer.reference}."
+                    )[:2000],
+                )
+                db.session.add(legacy_destination_batch)
+                db.session.flush()
+                moved_batches.append({
+                    "source_batch_id": legacy_source_batch.id,
+                    "destination_batch_id": legacy_destination_batch.id,
+                    "quantity": float(legacy_to_move),
+                    "buying_price": float(legacy_buying_price),
+                    "selling_price": float(legacy_selling_price),
+                    "original_batch_reference": legacy_source_batch.reference,
+                    "legacy_conversion": True,
+                    "costing_source": "PRODUCT_CATALOGUE_SNAPSHOT",
+                    "historical_stock_in_movement_id": legacy_receipt_movement.id,
+                })
 
             source_stock.quantity = source_new
             destination_stock.quantity = destination_new
@@ -5451,6 +5570,12 @@ def create_stock_transfer():
                     "selling_price": float(batch.selling_price),
                     "reference": batch.reference,
                     "supplier_reference": batch.supplier_reference,
+                    "legacy_conversion": "LEGACY_CONVERSION" in str(batch.supplier_reference or ""),
+                    "costing_source": (
+                        "PRODUCT_CATALOGUE_SNAPSHOT"
+                        if "CATALOGUE_PRICE_SNAPSHOT" in str(batch.supplier_reference or "")
+                        else "ORIGINAL_SOURCE_BATCH"
+                    ),
                 }
                 for batch in lineage_batches
             ]
