@@ -16,6 +16,7 @@ from models.notification import Notification
 from models.stock_movement import StockMovement
 from models.branch import Branch
 from models.branch_product_stock import BranchProductStock
+from models.stock_batch import StockBatch
 
 from admin_auth import admin_required
 
@@ -422,11 +423,24 @@ def get_stock_products():
 @cashier_required
 def add_cashier_stock():
     """
-    Add whole or fractional stock to the cashier's assigned branch.
+    Receive whole or fractional stock into the authenticated
+    cashier's assigned branch.
 
-    Supports up to three decimal places.
-    Updates branch inventory and stock movement history
-    within the same database transaction.
+    Every receipt creates its own StockBatch, preserving the buying
+    and selling prices that applied to that receipt. Branch stock,
+    batch stock and the stock movement are committed atomically.
+
+    Request fields:
+        product_id       Required integer.
+        quantity         Required positive quantity (up to 3 decimals).
+        buying_price     Optional; defaults to Product.buying_price.
+        selling_price    Optional; defaults to Product.price.
+        reference        Optional receipt/reference (max 80 chars).
+        supplier_reference Optional supplier reference (max 150 chars).
+        notes            Optional notes.
+
+    A buying price must be available either in the request or product
+    catalogue. The endpoint never invents a historical batch cost.
     """
 
     data = request.get_json(silent=True)
@@ -440,10 +454,6 @@ def add_cashier_stock():
     product_id = data.get("product_id")
     raw_quantity = data.get("quantity")
 
-    # --------------------------------------------------------
-    # VALIDATE PRODUCT ID
-    # --------------------------------------------------------
-
     if (
         isinstance(product_id, bool)
         or not isinstance(product_id, int)
@@ -454,10 +464,6 @@ def add_cashier_stock():
             "message": "Select a valid product.",
         }), 400
 
-    # --------------------------------------------------------
-    # VALIDATE DECIMAL QUANTITY
-    # --------------------------------------------------------
-
     if isinstance(raw_quantity, bool) or raw_quantity is None:
         return jsonify({
             "status": "error",
@@ -465,17 +471,12 @@ def add_cashier_stock():
         }), 400
 
     try:
-        if (
-            isinstance(raw_quantity, float)
-            and not math.isfinite(raw_quantity)
-        ):
+        if isinstance(raw_quantity, float) and not math.isfinite(raw_quantity):
             raise InvalidOperation
 
         quantity = Decimal(str(raw_quantity))
-
         if not quantity.is_finite() or quantity <= Decimal("0"):
             raise InvalidOperation
-
     except (InvalidOperation, ValueError, TypeError):
         return jsonify({
             "status": "error",
@@ -494,32 +495,41 @@ def add_cashier_stock():
             "message": "The quantity is too large.",
         }), 400
 
-    # --------------------------------------------------------
-    # VALIDATE REFERENCE AND NOTES
-    # --------------------------------------------------------
-
     reference = data.get("reference", "")
+    supplier_reference = data.get("supplier_reference", "")
     notes = data.get("notes", "")
 
-    if reference is None:
-        reference = ""
+    for field_name, value in (
+        ("reference", reference),
+        ("supplier_reference", supplier_reference),
+        ("notes", notes),
+    ):
+        if value is None:
+            value = ""
+        if not isinstance(value, str):
+            return jsonify({
+                "status": "error",
+                "message": (
+                    "Reference, supplier reference and notes must be text."
+                ),
+            }), 400
+        if field_name == "reference":
+            reference = value.strip()
+        elif field_name == "supplier_reference":
+            supplier_reference = value.strip()
+        else:
+            notes = value.strip()
 
-    if notes is None:
-        notes = ""
-
-    if not isinstance(reference, str) or not isinstance(notes, str):
+    if len(reference) > 80:
         return jsonify({
             "status": "error",
-            "message": "Reference and notes must be text.",
+            "message": "Reference cannot exceed 80 characters.",
         }), 400
 
-    reference = reference.strip()
-    notes = notes.strip()
-
-    if len(reference) > 150:
+    if len(supplier_reference) > 150:
         return jsonify({
             "status": "error",
-            "message": "Reference cannot exceed 150 characters.",
+            "message": "Supplier reference cannot exceed 150 characters.",
         }), 400
 
     if len(notes) > 5000:
@@ -528,9 +538,23 @@ def add_cashier_stock():
             "message": "Notes cannot exceed 5000 characters.",
         }), 400
 
-    # --------------------------------------------------------
-    # UPDATE BRANCH INVENTORY
-    # --------------------------------------------------------
+    def parse_price(raw_value, field_label):
+        """Parse a non-negative monetary value for NUMERIC(12, 2)."""
+        if isinstance(raw_value, bool) or raw_value is None:
+            raise ValueError(f"{field_label} is required.")
+        if isinstance(raw_value, float) and not math.isfinite(raw_value):
+            raise ValueError(f"{field_label} must be a valid amount.")
+        try:
+            amount = Decimal(str(raw_value))
+        except (InvalidOperation, ValueError, TypeError):
+            raise ValueError(f"{field_label} must be a valid amount.")
+        if not amount.is_finite() or amount < Decimal("0"):
+            raise ValueError(f"{field_label} must be zero or greater.")
+        if amount.as_tuple().exponent < -2:
+            raise ValueError(f"{field_label} can have at most 2 decimal places.")
+        if amount > Decimal("9999999999.99"):
+            raise ValueError(f"{field_label} exceeds the supported limit.")
+        return amount
 
     try:
         cashier = db.session.execute(
@@ -541,19 +565,14 @@ def add_cashier_stock():
 
         if cashier is None or not cashier.is_active:
             db.session.rollback()
-
             return jsonify({
                 "status": "error",
-                "message": (
-                    "This cashier account is inactive or unavailable."
-                ),
+                "message": "This cashier account is inactive or unavailable.",
             }), 403
 
         branch = get_active_cashier_branch(cashier)
-
         if branch is None:
             db.session.rollback()
-
             return jsonify({
                 "status": "error",
                 "message": (
@@ -570,7 +589,6 @@ def add_cashier_stock():
 
         if product is None:
             db.session.rollback()
-
             return jsonify({
                 "status": "error",
                 "message": "Product not found.",
@@ -578,13 +596,30 @@ def add_cashier_stock():
 
         if not product.is_active:
             db.session.rollback()
-
             return jsonify({
                 "status": "error",
-                "message": (
-                    "This product is inactive and cannot be restocked."
-                ),
+                "message": "This product is inactive and cannot be restocked.",
             }), 409
+
+        # Use receipt-specific prices when supplied. Otherwise use the
+        # catalogue defaults. Never substitute a made-up buying price.
+        raw_buying_price = data.get("buying_price")
+        if raw_buying_price is None:
+            raw_buying_price = product.buying_price
+
+        raw_selling_price = data.get("selling_price")
+        if raw_selling_price is None:
+            raw_selling_price = product.price
+
+        try:
+            buying_price = parse_price(raw_buying_price, "Buying price")
+            selling_price = parse_price(raw_selling_price, "Selling price")
+        except ValueError as exc:
+            db.session.rollback()
+            return jsonify({
+                "status": "error",
+                "message": str(exc),
+            }), 400
 
         branch_stock = db.session.execute(
             select(BranchProductStock)
@@ -595,39 +630,28 @@ def add_cashier_stock():
             .with_for_update()
         ).scalar_one_or_none()
 
-        # Create a branch stock record if none exists.
         if branch_stock is None:
             branch_stock = BranchProductStock(
                 branch_id=branch.id,
                 product_id=product.id,
                 quantity=Decimal("0.000"),
             )
-
             db.session.add(branch_stock)
             db.session.flush()
 
-        # ----------------------------------------------------
-        # CONVERT EXISTING STOCK TO DECIMAL
-        # ----------------------------------------------------
-
         try:
             previous_stock = Decimal(str(branch_stock.quantity))
-
             if not previous_stock.is_finite() or previous_stock < 0:
                 raise InvalidOperation
-
         except (InvalidOperation, ValueError, TypeError):
             invalid_value = branch_stock.quantity
             db.session.rollback()
-
             logger.error(
-                "Invalid branch stock: branch_id=%s, "
-                "product_id=%s, value=%r",
+                "Invalid branch stock: branch_id=%s, product_id=%s, value=%r",
                 branch.id,
                 product.id,
                 invalid_value,
             )
-
             return jsonify({
                 "status": "error",
                 "message": (
@@ -636,44 +660,50 @@ def add_cashier_stock():
                 ),
             }), 409
 
-        # ----------------------------------------------------
-        # CALCULATE NEW STOCK USING DECIMAL ARITHMETIC
-        # ----------------------------------------------------
-
         new_stock = previous_stock + quantity
-
         if new_stock > Decimal("999999999.999"):
             db.session.rollback()
-
             return jsonify({
                 "status": "error",
-                "message": (
-                    "This addition exceeds the supported stock limit."
-                ),
+                "message": "This addition exceeds the supported stock limit.",
             }), 400
 
-        # All quantities remain Decimal values in the database.
+        # 1. Create the immutable receipt batch. Its remaining quantity
+        #    starts equal to the received quantity.
+        batch = StockBatch(
+            reference=reference or None,
+            product_id=product.id,
+            branch_id=branch.id,
+            cashier_id=cashier.id,
+            quantity_received=quantity,
+            remaining_quantity=quantity,
+            buying_price=buying_price,
+            selling_price=selling_price,
+            supplier_reference=(supplier_reference or reference or None),
+            notes=notes or None,
+        )
+        db.session.add(batch)
+
+        # 2. Update the branch's aggregate inventory.
         branch_stock.quantity = new_stock
 
-        # ----------------------------------------------------
-        # RECORD STOCK MOVEMENT
-        # ----------------------------------------------------
-
+        # 3. Record the stock-in movement in the same transaction.
         movement = StockMovement(
             cashier_id=cashier.id,
+            movement_type="STOCK_IN",
             product_id=product.id,
             branch_id=branch.id,
             product_name=product.name,
             previous_stock=previous_stock,
             quantity_added=quantity,
             new_stock=new_stock,
-            reference=reference or None,
+            reference=reference or supplier_reference or None,
             notes=notes or None,
         )
-
         db.session.add(movement)
         db.session.flush()
 
+        batch_data = batch.to_dict()
         movement_data = serialize_stock_movement(movement)
 
         result = {
@@ -688,15 +718,17 @@ def add_cashier_stock():
                 "name": branch.name,
                 "code": branch.code,
             },
+            "batch": batch_data,
             "movement": movement_data,
         }
 
-        # Save the stock update and audit record together.
+        # Batch, aggregate stock and movement history either all save,
+        # or all roll back together.
         db.session.commit()
 
         logger.info(
-            "Cashier %s (ID %s) added %s units to product %s "
-            "(ID %s), branch %s (ID %s).",
+            "Cashier %s (ID %s) received %s units of product %s (ID %s) "
+            "at branch %s (ID %s); batch ID %s, BP %s, SP %s.",
             cashier.username,
             cashier.id,
             quantity,
@@ -704,42 +736,41 @@ def add_cashier_stock():
             product.id,
             branch.name,
             branch.id,
+            batch.id,
+            buying_price,
+            selling_price,
         )
 
         return jsonify({
             "status": "success",
             "message": (
-                f"Added {quantity} {product.unit} "
-                f"to {product.name} at {branch.name} successfully."
+                f"Added {quantity} {product.unit} of {product.name} "
+                f"to {branch.name} and recorded the stock batch."
             ),
             **result,
         }), 201
 
     except IntegrityError:
         db.session.rollback()
-
         logger.exception(
-            "Branch stock addition violated a database constraint."
+            "Cashier stock receipt violated a database constraint."
         )
-
         return jsonify({
             "status": "error",
             "message": (
-                "Stock could not be added because of a database "
-                "constraint or a concurrent inventory update. "
-                "Refresh the inventory and try again."
+                "Stock could not be received because of a database "
+                "constraint or concurrent inventory update. "
+                "No changes were committed. Refresh and try again."
             ),
         }), 409
 
     except Exception:
         db.session.rollback()
-
-        logger.exception("Cashier branch stock addition failed.")
-
+        logger.exception("Cashier branch stock receipt failed.")
         return jsonify({
             "status": "error",
             "message": (
-                "Unable to add stock right now. "
+                "Unable to receive stock right now. "
                 "No changes have been committed."
             ),
         }), 500
