@@ -3527,8 +3527,10 @@ def get_pos_branch_report():
 #   end_date=YYYY-MM-DD
 # ============================================================
 
+# This legacy listing is kept available under a separate URL to avoid
+# shadowing the richer paginated endpoint registered by admin_pos_sales_bp.
 @admin_bp.route(
-    "/api/admin/pos-sales",
+    "/api/admin/pos-sales/legacy",
     methods=["GET"]
 )
 @admin_required
