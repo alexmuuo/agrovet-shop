@@ -1180,26 +1180,43 @@ def void_pos_sale(sale_id):
                 409,
             )
 
-        # Restore the exact original batches and mark their allocations
-        # restored. This service does not commit independently.
-        try:
-            batch_restore = restore_sale_item_batches(
-                list(sale.items),
-                restoration_reference=f"VOID-{sale.sale_number}",
-            )
-        except ValueError as exc:
-            db.session.rollback()
-            return error_response(str(exc), 409)
+        # Restore the exact original batch allocations, when present.
+        # Legacy sales may not have batch allocations; those sales can
+        # still be voided because branch stock is restored below.
+        # The service owns the allocation restoration and does not commit.
+        if sale_items_have_batch_allocations(list(sale.items)):
+            try:
+                # The service accepts only the sale-items argument.
+                batch_restore = restore_sale_item_batches(
+                    list(sale.items)
+                )
+            except ValueError as exc:
+                db.session.rollback()
+                return error_response(str(exc), 409)
 
-        if not batch_restore.get("restored"):
-            db.session.rollback()
-            return error_response(
-                batch_restore.get(
-                    "message",
-                    "Original stock batches could not be restored.",
+            if not isinstance(batch_restore, dict) or not batch_restore.get(
+                "restored"
+            ):
+                db.session.rollback()
+                message = (
+                    batch_restore.get("message")
+                    if isinstance(batch_restore, dict)
+                    else None
+                )
+                return error_response(
+                    message or "Original stock batches could not be restored.",
+                    409,
+                )
+        else:
+            batch_restore = {
+                "restored": True,
+                "allocation_count": 0,
+                "restored_quantity": Decimal("0.000"),
+                "message": (
+                    "No batch allocations were recorded for this sale. "
+                    "Branch stock was restored."
                 ),
-                409,
-            )
+            }
 
         # Restore branch stock.
         for product_id in product_ids:
@@ -1212,6 +1229,10 @@ def void_pos_sale(sale_id):
 
         # Mark the sale as voided.
         sale.status = "voided"
+
+        # Capture this BEFORE changing payment statuses. It is used
+        # to flag that an actual customer refund may need review.
+        has_successful_payment = sale_has_successful_payment(sale)
 
         # Automatically void successful payment records.
         # This is an accounting status change only; it does not
@@ -1239,8 +1260,6 @@ def void_pos_sale(sale_id):
             after_data=after_data,
         )
 
-        has_successful_payment = sale_has_successful_payment(sale)
-
         # The audit snapshots are already JSON-safe here.
         db.session.commit()
 
@@ -1256,11 +1275,14 @@ def void_pos_sale(sale_id):
 ),
             "sale": sale_snapshot(sale),
             "batch_restoration": {
-                "allocation_count": batch_restore["allocation_count"],
+                "allocation_count": batch_restore.get("allocation_count", 0),
                 "restored_quantity": json_number(
-                    batch_restore["restored_quantity"]
+                    batch_restore.get("restored_quantity", Decimal("0.000"))
                 ),
-                "message": batch_restore["message"],
+                "message": batch_restore.get(
+                    "message",
+                    "Batch restoration completed.",
+                ),
             },
             "refund_required_review": has_successful_payment,
             "payment_notice": (
