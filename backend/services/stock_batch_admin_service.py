@@ -91,18 +91,25 @@ def restore_sale_item_batches(sale_items):
             ),
         }
 
-    pending_allocations = [
-        allocation for allocation in allocations
-        if not bool(allocation.is_restored)
-    ]
-
-    if not pending_allocations:
+    restored_count = sum(
+        1 for allocation in allocations
+        if bool(allocation.is_restored)
+    )
+    if restored_count:
+        # Mixed restoration state is corruption/partial prior work. Do
+        # not restore a subset while the route restores the full branch
+        # quantity; require reconciliation instead.
         return {
             "restored": False,
             "allocation_count": 0,
             "restored_quantity": Decimal("0.000"),
-            "message": "These batch allocations have already been restored.",
+            "message": (
+                "One or more allocations for this sale were already "
+                "restored. No inventory was changed; reconcile this sale."
+            ),
         }
+
+    pending_allocations = allocations
 
     batch_ids = sorted({
         allocation.batch_id
