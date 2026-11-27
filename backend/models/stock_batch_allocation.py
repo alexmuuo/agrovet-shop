@@ -76,6 +76,14 @@ class StockBatchAllocation(db.Model):
         nullable=False,
     )
 
+    # False means this allocation came from legacy stock with no verified BP.
+    cost_is_known = db.Column(
+        db.Boolean,
+        nullable=False,
+        default=True,
+        server_default=db.true(),
+    )
+
     created_at = db.Column(
         db.DateTime,
         nullable=False,
