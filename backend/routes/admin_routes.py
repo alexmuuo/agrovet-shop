@@ -2570,49 +2570,119 @@ def decimal_value(value, default="0.00"):
 
 
 def get_pos_item_financials(item):
-    """Calculate POS line revenue and historical batch-based COGS.
+    """Return POS line financials from immutable sale/batch snapshots.
 
-    Revenue uses the actual customer-facing quantity and unit price.
-    COGS comes from FIFO batch allocations, never today's Product BP.
-    Legacy items without allocations may use their stored item BP snapshot.
+    Batch allocations are authoritative for both revenue and cost. This is
+    important for portion sales and sales that consume batches with different
+    selling prices: recomputing from the sale item's rounded weighted price can
+    introduce discrepancies. Legacy sales without allocations use only their
+    saved item-level buying-price snapshot, never today's Product price.
     """
     raw_stock_quantity = getattr(item, "quantity", None)
     raw_sale_quantity = getattr(item, "sale_quantity", None)
+
     if isinstance(raw_stock_quantity, bool) or raw_stock_quantity is None:
         return None
     if raw_sale_quantity is None:
         raw_sale_quantity = raw_stock_quantity
     if isinstance(raw_sale_quantity, bool):
         return None
+
     try:
         stock_quantity = Decimal(str(raw_stock_quantity))
         sale_quantity = Decimal(str(raw_sale_quantity))
-        if (not stock_quantity.is_finite() or stock_quantity <= 0
-                or stock_quantity.as_tuple().exponent < -3
-                or not sale_quantity.is_finite() or sale_quantity <= 0
-                or sale_quantity.as_tuple().exponent < -3):
+        if (
+            not stock_quantity.is_finite()
+            or stock_quantity <= 0
+            or stock_quantity.as_tuple().exponent < -3
+            or not sale_quantity.is_finite()
+            or sale_quantity <= 0
+            or sale_quantity.as_tuple().exponent < -3
+        ):
             return None
     except (InvalidOperation, ValueError, TypeError):
         return None
 
-    selling_price = decimal_value(getattr(item, "price", None), default="-1.00")
-    if selling_price < 0:
+    selling_price = decimal_value(
+        getattr(item, "price", None),
+        default="-1.00",
+    )
+    if not selling_price.is_finite() or selling_price < 0:
         return None
-    revenue = selling_price * sale_quantity
 
-    # Allocations are the authoritative source when present.
-    # Batch allocations are eagerly loaded by get_pos_report_items().
-    # Reading the relationship here avoids one database query per sale item.
+    # Used for legacy rows and as a conservative fallback if allocation
+    # history is internally inconsistent.
+    line_revenue = selling_price * sale_quantity
+
     allocations = list(
         getattr(item, "batch_allocations", []) or []
     )
-    active_allocations = [
-        allocation for allocation in allocations
-        if not bool(getattr(allocation, "is_restored", False))
-    ]
-    if active_allocations:
-        # A legacy batch has no verified historical BP. Do not report
-        # its schema placeholder as a genuine zero-cost sale.
+
+    if allocations:
+        active_allocations = [
+            allocation
+            for allocation in allocations
+            if not bool(getattr(allocation, "is_restored", False))
+        ]
+
+        # A sale with allocation history must not silently fall back to the
+        # item-level BP if those allocations were restored or are incomplete.
+        # Such a sale is financially inconsistent and its cost is unknown.
+        if not active_allocations or len(active_allocations) != len(allocations):
+            return {
+                "quantity": stock_quantity,
+                "stock_quantity": stock_quantity,
+                "sale_quantity": sale_quantity,
+                "selling_price": selling_price,
+                "revenue": line_revenue,
+                "buying_price": None,
+                "cost": None,
+                "profit": None,
+            }
+
+        try:
+            allocation_revenue = sum(
+                (
+                    Decimal(str(allocation.revenue))
+                    for allocation in active_allocations
+                ),
+                Decimal("0.00"),
+            )
+            allocated_quantity = sum(
+                (
+                    Decimal(str(allocation.quantity))
+                    for allocation in active_allocations
+                ),
+                Decimal("0.000"),
+            )
+        except (InvalidOperation, ValueError, TypeError):
+            return None
+
+        if (
+            not allocation_revenue.is_finite()
+            or allocation_revenue < 0
+            or not allocated_quantity.is_finite()
+            or allocated_quantity <= 0
+        ):
+            return None
+
+        # Allocation revenue is the exact recorded batch revenue. Do not
+        # reconstruct it from a rounded weighted-average sale-item price.
+        revenue = allocation_revenue
+
+        # A partial or excess allocation is not a trustworthy COGS record.
+        if abs(allocated_quantity - stock_quantity) > Decimal("0.0005"):
+            return {
+                "quantity": stock_quantity,
+                "stock_quantity": stock_quantity,
+                "sale_quantity": sale_quantity,
+                "selling_price": selling_price,
+                "revenue": revenue,
+                "buying_price": None,
+                "cost": None,
+                "profit": None,
+            }
+
         if any(
             not bool(getattr(allocation, "cost_is_known", True))
             for allocation in active_allocations
@@ -2628,58 +2698,68 @@ def get_pos_item_financials(item):
                 "profit": None,
             }
 
-        allocated_quantity = sum(
-            (Decimal(str(a.quantity or 0)) for a in active_allocations),
-            Decimal("0.000")
-        )
-        cost = sum(
-            (Decimal(str(a.cost or 0)) for a in active_allocations),
-            Decimal("0.00")
-        )
-        if allocated_quantity + Decimal("0.0005") < stock_quantity:
-            # Do not report partial allocations as complete COGS.
-            return {
-                "quantity": stock_quantity,
-                "stock_quantity": stock_quantity,
-                "sale_quantity": sale_quantity,
-                "selling_price": selling_price,
-                "revenue": revenue,
-                "buying_price": None,
-                "cost": None,
-                "profit": None,
-            }
-        weighted_bp = (cost / allocated_quantity) if allocated_quantity else None
+        try:
+            cost = sum(
+                (
+                    Decimal(str(allocation.cost))
+                    for allocation in active_allocations
+                ),
+                Decimal("0.00"),
+            )
+        except (InvalidOperation, ValueError, TypeError):
+            return None
+
+        if not cost.is_finite() or cost < 0:
+            return None
+
+        weighted_buying_price = cost / allocated_quantity
+
         return {
             "quantity": stock_quantity,
             "stock_quantity": stock_quantity,
             "sale_quantity": sale_quantity,
             "selling_price": selling_price,
             "revenue": revenue,
-            "buying_price": weighted_bp,
+            "buying_price": weighted_buying_price,
             "cost": cost,
             "profit": revenue - cost,
         }
 
-    # Legacy sales: use only their saved BP snapshot, not current Product BP.
+    # Backward compatibility for sales created before batch allocation.
     raw_buying_price = getattr(item, "buying_price", None)
     if raw_buying_price is None:
         buying_price = None
     else:
-        buying_price = decimal_value(raw_buying_price, default="-1.00")
-        if buying_price < 0:
+        buying_price = decimal_value(
+            raw_buying_price,
+            default="-1.00",
+        )
+        if (
+            not buying_price.is_finite()
+            or buying_price < 0
+        ):
             buying_price = None
-    cost = buying_price * stock_quantity if buying_price is not None else None
+
+    cost = (
+        buying_price * stock_quantity
+        if buying_price is not None
+        else None
+    )
+
     return {
         "quantity": stock_quantity,
         "stock_quantity": stock_quantity,
         "sale_quantity": sale_quantity,
         "selling_price": selling_price,
-        "revenue": revenue,
+        "revenue": line_revenue,
         "buying_price": buying_price,
         "cost": cost,
-        "profit": revenue - cost if cost is not None else None,
+        "profit": (
+            line_revenue - cost
+            if cost is not None
+            else None
+        ),
     }
-
 
 def get_pos_report_items(sales):
     """
@@ -3678,12 +3758,9 @@ def export_all_pos_reports_excel():
 
         start_date, end_date = parse_report_dates()
 
-        branch_id = request.args.get("branch_id", type=int)
-        if branch_id is not None and branch_id <= 0:
-            return jsonify({
-                "status": "error",
-                "message": "Invalid branch ID.",
-            }), 400
+        # Use the same strict branch filter parser as the JSON report
+        # endpoints. An invalid branch_id must never silently export all branches.
+        branch_id = get_report_branch_id()
 
         # ----------------------------------------------------
         # FETCH POS SALES
