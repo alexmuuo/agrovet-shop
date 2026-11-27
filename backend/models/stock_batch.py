@@ -140,8 +140,9 @@ class StockBatch(db.Model):
             "remaining_quantity": float(
                 self.remaining_quantity or 0
             ),
-            "buying_price": float(
-                self.buying_price or 0
+            "buying_price": (
+                float(self.buying_price or 0)
+                if self.cost_is_known else None
             ),
             "selling_price": float(
                 self.selling_price or 0
