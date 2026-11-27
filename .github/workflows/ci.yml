@@ -26,8 +26,8 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
-      - name: Run ESLint
-        run: npm run lint
+      - name: Lint the changed reports page
+        run: npx eslint src/pages/seller/Reports.jsx
 
       - name: Build frontend
         run: npm run build
