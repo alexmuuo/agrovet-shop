@@ -4185,11 +4185,16 @@ def export_all_pos_reports_excel():
                 float(revenue),
                 float(cost) if cost is not None else None,
                 float(profit) if profit is not None else None,
-                "Known" if buying_price is not None else "Unknown",
+                (
+                    "Invalid financial data"
+                    if financials is None
+                    else "Known" if buying_price is not None
+                    else "Unknown"
+                ),
                 "Yes" if sale and sale.id in paid_sale_ids else "No",
             ])
 
-            if sale and sale.id in paid_sale_ids and financials:
+            if sale and sale.id in paid_sale_ids:
                 key = getattr(item, "product_id", None)
 
                 if key not in product_totals:
@@ -4201,15 +4206,22 @@ def export_all_pos_reports_excel():
                         "cost": Decimal("0.00"),
                         "profit": Decimal("0.00"),
                         "unknown_cost_revenue": Decimal("0.00"),
+                        "unknown_cost_item_count": 0,
+                        "invalid_financial_item_count": 0,
                     }
 
                 totals = product_totals[key]
+
+                if financials is None:
+                    totals["invalid_financial_item_count"] += 1
+                    continue
 
                 totals["stock_qty"] += financials["stock_quantity"]
                 totals["sale_qty"] += financials["sale_quantity"]
                 totals["revenue"] += financials["revenue"]
 
                 if financials["cost"] is None:
+                    totals["unknown_cost_item_count"] += 1
                     totals["unknown_cost_revenue"] += (
                         financials["revenue"]
                     )
@@ -4319,6 +4331,7 @@ def export_all_pos_reports_excel():
         item_cost = Decimal("0.00")
         known_profit = Decimal("0.00")
         unknown_cost_revenue = Decimal("0.00")
+        invalid_financial_item_count = 0
 
         for item in items:
             sale = sales_by_id.get(
@@ -4331,6 +4344,7 @@ def export_all_pos_reports_excel():
             financials = get_pos_item_financials(item)
 
             if not financials:
+                invalid_financial_item_count += 1
                 continue
 
             if financials["cost"] is None:
@@ -4384,6 +4398,10 @@ def export_all_pos_reports_excel():
                 float(unknown_cost_revenue)
             ],
             [
+                "Invalid Financial Item Records",
+                invalid_financial_item_count
+            ],
+            [
                 "Average Confirmed Sale Value",
                 float(total_revenue / len(paid_sales))
                 if paid_sales else 0
@@ -4391,7 +4409,8 @@ def export_all_pos_reports_excel():
             [
                 "Profit Note",
                 "Gross profit is partial when historical buying "
-                "prices are missing; it is not net profit."
+                "prices are missing or sale-item financial records "
+                "are invalid; it is not net profit."
             ],
             [
                 "Scope Note",
@@ -4425,6 +4444,8 @@ def export_all_pos_reports_excel():
                     "cost": Decimal("0.00"),
                     "profit": Decimal("0.00"),
                     "unknown_cost_revenue": Decimal("0.00"),
+                    "unknown_cost_item_count": 0,
+                    "invalid_financial_item_count": 0,
                 }
 
             branch_totals[key]["count"] += 1
@@ -4441,10 +4462,6 @@ def export_all_pos_reports_excel():
                 continue
 
             financials = get_pos_item_financials(item)
-
-            if not financials:
-                continue
-
             key = getattr(sale, "branch_id", None)
 
             if key not in branch_totals:
@@ -4455,9 +4472,16 @@ def export_all_pos_reports_excel():
                     "cost": Decimal("0.00"),
                     "profit": Decimal("0.00"),
                     "unknown_cost_revenue": Decimal("0.00"),
+                    "unknown_cost_item_count": 0,
+                    "invalid_financial_item_count": 0,
                 }
 
+            if not financials:
+                branch_totals[key]["invalid_financial_item_count"] += 1
+                continue
+
             if financials["cost"] is None:
+                branch_totals[key]["unknown_cost_item_count"] += 1
                 branch_totals[key]["unknown_cost_revenue"] += (
                     financials["revenue"]
                 )
@@ -4474,10 +4498,15 @@ def export_all_pos_reports_excel():
                 float(data["cost"]),
                 float(data["profit"]),
                 float(data["unknown_cost_revenue"]),
+                data["unknown_cost_item_count"],
+                data["invalid_financial_item_count"],
                 (
                     "Complete"
-                    if data["unknown_cost_revenue"] == 0
-                    else "Incomplete: missing historical costs"
+                    if (
+                        data["unknown_cost_item_count"] == 0
+                        and data["invalid_financial_item_count"] == 0
+                    )
+                    else "Incomplete: unknown costs or invalid financial data"
                 ),
             ]
             for key, data in sorted(
@@ -4497,6 +4526,8 @@ def export_all_pos_reports_excel():
                 "Known Cost of Goods Sold",
                 "Gross Profit on Known Costs",
                 "Sales Value with Unknown Costs",
+                "Unknown Cost Items",
+                "Invalid Financial Items",
                 "Cost Data Status",
             ],
             branch_rows
@@ -4522,10 +4553,15 @@ def export_all_pos_reports_excel():
                 float(data["cost"]),
                 float(data["profit"]),
                 float(data["unknown_cost_revenue"]),
+                data["unknown_cost_item_count"],
+                data["invalid_financial_item_count"],
                 (
                     "Complete"
-                    if data["unknown_cost_revenue"] == 0
-                    else "Incomplete: missing historical costs"
+                    if (
+                        data["unknown_cost_item_count"] == 0
+                        and data["invalid_financial_item_count"] == 0
+                    )
+                    else "Incomplete: unknown costs or invalid financial data"
                 ),
             ])
 
@@ -4540,6 +4576,8 @@ def export_all_pos_reports_excel():
                 "Known Cost of Goods Sold",
                 "Gross Profit on Known Costs",
                 "Sales Value with Unknown Costs",
+                "Unknown Cost Items",
+                "Invalid Financial Items",
                 "Cost Data Status",
             ],
             product_rows
@@ -4751,7 +4789,12 @@ def export_all_pos_reports_excel():
                     float(revenue),
                     float(cost) if cost is not None else None,
                     float(profit) if profit is not None else None,
-                    "Known" if buying_price is not None else "Unknown",
+                    (
+                    "Invalid financial data"
+                    if financials is None
+                    else "Known" if buying_price is not None
+                    else "Unknown"
+                ),
                     "Yes" if sale and sale.id in paid_sale_ids else "No",
                 ])
             write_table(branch_items_ws, [
