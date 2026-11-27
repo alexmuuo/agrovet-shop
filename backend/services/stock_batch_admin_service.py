@@ -115,6 +115,40 @@ def restore_sale_item_batches(sale_items):
                 "No inventory was changed; reconcile the sale first."
             )
 
+    # A sale must be restored as a complete unit. Partial or mismatched
+    # allocation history must be reconciled before any batch is changed.
+    expected_quantities = {
+        item.id: to_quantity(item.quantity)
+        for item in sale_items
+        if item.id is not None
+    }
+    allocated_quantities = {}
+    for allocation in allocations:
+        if allocation.sale_item_id not in expected_quantities:
+            return {
+                "restored": False,
+                "allocation_count": 0,
+                "restored_quantity": Decimal("0.000"),
+                "message": "An allocation does not belong to this sale. No inventory was changed.",
+            }
+        allocated_quantities[allocation.sale_item_id] = (
+            allocated_quantities.get(allocation.sale_item_id, Decimal("0.000"))
+            + to_quantity(allocation.quantity)
+        )
+
+    for sale_item_id, expected_quantity in expected_quantities.items():
+        if allocated_quantities.get(sale_item_id, Decimal("0.000")) != expected_quantity:
+            return {
+                "restored": False,
+                "allocation_count": 0,
+                "restored_quantity": Decimal("0.000"),
+                "message": (
+                    f"Batch allocations for sale item {sale_item_id} do not "
+                    "match its sold quantity. No inventory was changed; "
+                    "reconcile this sale before voiding it."
+                ),
+            }
+
     restored_count = sum(
         1 for allocation in allocations
         if bool(allocation.is_restored)
