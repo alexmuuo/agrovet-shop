@@ -167,8 +167,11 @@ class StockBatchAllocation(db.Model):
             "buying_price": float(self.buying_price),
             "selling_price": float(self.selling_price),
             "revenue": float(self.revenue),
-            "cost": float(self.cost),
-            "gross_profit": float(self.gross_profit),
+            "cost": float(self.cost) if self.cost_is_known else None,
+            "gross_profit": (
+                float(self.gross_profit) if self.cost_is_known else None
+            ),
+            "cost_is_known": bool(self.cost_is_known),
             "created_at": (
                 self.created_at.isoformat()
                 if self.created_at else None
