@@ -164,7 +164,9 @@ class StockBatchAllocation(db.Model):
             "batch_id": self.batch_id,
             "sale_item_id": self.sale_item_id,
             "quantity": float(self.quantity),
-            "buying_price": float(self.buying_price),
+            "buying_price": (
+                float(self.buying_price) if self.cost_is_known else None
+            ),
             "selling_price": float(self.selling_price),
             "revenue": float(self.revenue),
             "cost": float(self.cost) if self.cost_is_known else None,
