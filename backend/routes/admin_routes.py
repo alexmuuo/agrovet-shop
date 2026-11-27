@@ -5377,6 +5377,7 @@ def create_stock_transfer():
                     remaining_quantity=moved_quantity,
                     buying_price=source_batch.buying_price,
                     selling_price=source_batch.selling_price,
+                    cost_is_known=bool(getattr(source_batch, "cost_is_known", True)),
                     supplier_reference=(
                         f"TRANSFER:{transfer.reference};"
                         f"SOURCE_PRODUCT_ID:{source_product_id};"
@@ -5458,6 +5459,7 @@ def create_stock_transfer():
                     remaining_quantity=Decimal("0.000"),
                     buying_price=legacy_buying_price,
                     selling_price=legacy_selling_price,
+                    cost_is_known=False,
                     supplier_reference=(
                         f"LEGACY_CONVERSION;TRANSFER:{transfer.reference};"
                         f"SOURCE_PRODUCT_ID:{source_product_id}"
@@ -5483,6 +5485,7 @@ def create_stock_transfer():
                     remaining_quantity=legacy_to_move,
                     buying_price=legacy_buying_price,
                     selling_price=legacy_selling_price,
+                    cost_is_known=False,
                     supplier_reference=(
                         f"TRANSFER:{transfer.reference};"
                         f"SOURCE_PRODUCT_ID:{source_product_id};"
