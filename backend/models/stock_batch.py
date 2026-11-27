@@ -146,6 +146,7 @@ class StockBatch(db.Model):
             "selling_price": float(
                 self.selling_price or 0
             ),
+            "cost_is_known": bool(self.cost_is_known),
             "supplier_reference": self.supplier_reference,
             "reference": self.reference,
             "notes": self.notes,
