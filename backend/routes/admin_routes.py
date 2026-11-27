@@ -2850,6 +2850,7 @@ def get_pos_financial_summary(sales):
         "unknown_cost_item_count": 0,
         "known_cost_quantity": 0,
         "unknown_cost_quantity": 0,
+        "invalid_financial_item_count": 0,
         "profit_is_complete": True,
     }
 
@@ -2871,6 +2872,8 @@ def get_pos_financial_summary(sales):
                 "Skipping invalid POS sale item ID %s.",
                 item.id
             )
+            summary["invalid_financial_item_count"] += 1
+            summary["profit_is_complete"] = False
             continue
 
         quantity = financials["quantity"]
@@ -3063,6 +3066,10 @@ def get_pos_sales_report():
                     "cost_of_goods_sold": Decimal("0.00"),
                     "gross_profit": Decimal("0.00"),
                     "known_cost_revenue": Decimal("0.00"),
+                    "unknown_cost_sales_value": Decimal("0.00"),
+                    "known_cost_item_count": 0,
+                    "unknown_cost_item_count": 0,
+                    "invalid_financial_item_count": 0,
                 }
 
             daily_sales[day]["sales"] += 1
@@ -3082,29 +3089,32 @@ def get_pos_sales_report():
         }
 
         for item in items:
-            financials = get_pos_item_financials(item)
-
-            if financials is None:
-                continue
-
             sale = sales_by_id.get(item.sale_id)
 
             if sale is None or not sale.created_at:
                 continue
 
             day = sale.created_at.date().isoformat()
+            financials = get_pos_item_financials(item)
 
-            if financials["buying_price"] is None:
+            if financials is None:
+                daily_sales[day]["invalid_financial_item_count"] += 1
                 continue
 
+            if financials["buying_price"] is None:
+                daily_sales[day]["unknown_cost_item_count"] += 1
+                daily_sales[day]["unknown_cost_sales_value"] += (
+                    financials["revenue"]
+                )
+                continue
+
+            daily_sales[day]["known_cost_item_count"] += 1
             daily_sales[day]["cost_of_goods_sold"] += (
                 financials["cost"]
             )
-
             daily_sales[day]["gross_profit"] += (
                 financials["profit"]
             )
-
             daily_sales[day]["known_cost_revenue"] += (
                 financials["revenue"]
             )
@@ -3132,14 +3142,34 @@ def get_pos_sales_report():
                 "cost_of_goods_sold": money(
                     values["cost_of_goods_sold"]
                 ),
-                "gross_profit": money(
-                    values["gross_profit"]
+                "gross_profit": (
+                    money(values["gross_profit"])
+                    if values["known_cost_item_count"] > 0
+                    else None
                 ),
-                "profit_margin": money(
-                    calculate_margin(
-                        values["gross_profit"],
-                        known_cost_revenue
+                "profit_margin": (
+                    money(
+                        calculate_margin(
+                            values["gross_profit"],
+                            known_cost_revenue
+                        )
                     )
+                    if known_cost_revenue > 0
+                    else None
+                ),
+                "known_cost_item_count": values["known_cost_item_count"],
+                "unknown_cost_item_count": values["unknown_cost_item_count"],
+                "unknown_cost_sales_value": money(
+                    values["unknown_cost_sales_value"]
+                ),
+                "invalid_financial_item_count": values["invalid_financial_item_count"],
+                "profit_is_complete": (
+                    values["unknown_cost_item_count"] == 0
+                    and values["invalid_financial_item_count"] == 0
+                ),
+                "cost_known": (
+                    values["unknown_cost_item_count"] == 0
+                    and values["invalid_financial_item_count"] == 0
                 ),
             })
 
@@ -3227,10 +3257,6 @@ def get_pos_product_report():
                 continue
 
             financials = get_pos_item_financials(item)
-
-            if financials is None:
-                continue
-
             product_id = item.product_id
 
             if product_id not in products:
@@ -3255,9 +3281,14 @@ def get_pos_product_report():
                     "known_cost_quantity": 0,
                     "unknown_cost_quantity": 0,
                     "unknown_cost_sales_value": Decimal("0.00"),
+                    "invalid_financial_item_count": 0,
                 }
 
             row = products[product_id]
+
+            if financials is None:
+                row["invalid_financial_item_count"] += 1
+                continue
 
             row["quantity_sold"] += financials["sale_quantity"]
             row["stock_quantity_sold"] += financials["stock_quantity"]
@@ -3295,6 +3326,7 @@ def get_pos_product_report():
         for row in products.values():
             cost_complete = (
                 row["unknown_cost_quantity"] == 0
+                and row["invalid_financial_item_count"] == 0
             )
 
             results.append({
@@ -3340,6 +3372,8 @@ def get_pos_product_report():
                 "unknown_cost_quantity": quantity_number(row[
                     "unknown_cost_quantity"
                 ]),
+                "invalid_financial_item_count": row["invalid_financial_item_count"],
+                "profit_is_complete": cost_complete,
                 "cost_known": cost_complete,
                 "unknown_cost": not cost_complete,
             })
@@ -3450,6 +3484,7 @@ def get_pos_branch_report():
                     "unknown_cost_sales_value": Decimal("0.00"),
                     "known_cost_item_count": 0,
                     "unknown_cost_item_count": 0,
+                    "invalid_financial_item_count": 0,
                 }
 
             row = branch_totals[branch_id]
@@ -3474,12 +3509,13 @@ def get_pos_branch_report():
 
             financials = get_pos_item_financials(item)
 
-            if financials is None:
-                continue
-
             row = branch_totals.get(sale.branch_id)
 
             if row is None:
+                continue
+
+            if financials is None:
+                row["invalid_financial_item_count"] += 1
                 continue
 
             if financials["buying_price"] is None:
@@ -3510,6 +3546,7 @@ def get_pos_branch_report():
         for row in branch_totals.values():
             cost_complete = (
                 row["unknown_cost_item_count"] == 0
+                and row["invalid_financial_item_count"] == 0
             )
 
             results.append({
@@ -3554,6 +3591,8 @@ def get_pos_branch_report():
                 "unknown_cost_item_count": row[
                     "unknown_cost_item_count"
                 ],
+                "invalid_financial_item_count": row["invalid_financial_item_count"],
+                "profit_is_complete": cost_complete,
                 "cost_known": cost_complete,
                 "unknown_cost": not cost_complete,
             })
