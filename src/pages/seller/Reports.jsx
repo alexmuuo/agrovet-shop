@@ -266,7 +266,7 @@ try {
     api.get("/admin/reports/pos/overview", { params: posParams }),
     api.get("/admin/reports/pos/sales", { params: posParams }),
     api.get("/admin/reports/pos/products", { params: posParams }),
-    api.get("/admin/reports/pos/branches", { params }),
+    api.get("/admin/reports/pos/branches", { params: posParams }),
     api.get("/admin/stock-transfers", {
       params: branchId ? { branch_id: branchId, limit: 500 } : { limit: 500 },
     }),
