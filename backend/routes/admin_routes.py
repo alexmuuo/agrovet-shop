@@ -2611,6 +2611,23 @@ def get_pos_item_financials(item):
         if not bool(getattr(allocation, "is_restored", False))
     ]
     if active_allocations:
+        # A legacy batch has no verified historical BP. Do not report
+        # its schema placeholder as a genuine zero-cost sale.
+        if any(
+            not bool(getattr(allocation, "cost_is_known", True))
+            for allocation in active_allocations
+        ):
+            return {
+                "quantity": stock_quantity,
+                "stock_quantity": stock_quantity,
+                "sale_quantity": sale_quantity,
+                "selling_price": selling_price,
+                "revenue": revenue,
+                "buying_price": None,
+                "cost": None,
+                "profit": None,
+            }
+
         allocated_quantity = sum(
             (Decimal(str(a.quantity or 0)) for a in active_allocations),
             Decimal("0.000")
