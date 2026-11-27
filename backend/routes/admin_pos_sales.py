@@ -292,8 +292,19 @@ def sale_snapshot(sale):
                     "buying_price": json_money(allocation.buying_price),
                     "selling_price": json_money(allocation.selling_price),
                     "revenue": json_money(allocation.revenue),
-                    "cost": json_money(allocation.cost),
-                    "gross_profit": json_money(allocation.gross_profit),
+                    "cost": (
+                        json_money(allocation.cost)
+                        if getattr(allocation, "cost_is_known", True)
+                        else None
+                    ),
+                    "gross_profit": (
+                        json_money(allocation.gross_profit)
+                        if getattr(allocation, "cost_is_known", True)
+                        else None
+                    ),
+                    "cost_is_known": bool(
+                        getattr(allocation, "cost_is_known", True)
+                    ),
                     "is_restored": bool(allocation.is_restored),
                     "restored_at": (
                         allocation.restored_at.isoformat()
