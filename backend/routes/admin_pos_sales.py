@@ -289,7 +289,11 @@ def sale_snapshot(sale):
                     "id": allocation.id,
                     "batch_id": allocation.batch_id,
                     "quantity": json_number(allocation.quantity),
-                    "buying_price": json_money(allocation.buying_price),
+                    "buying_price": (
+                        json_money(allocation.buying_price)
+                        if getattr(allocation, "cost_is_known", True)
+                        else None
+                    ),
                     "selling_price": json_money(allocation.selling_price),
                     "revenue": json_money(allocation.revenue),
                     "cost": (
