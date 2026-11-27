@@ -1,6 +1,44 @@
 import { useCallback, useEffect, useState } from "react";
 import api from "../../api/api";
 
+// =========================================================
+// REUSABLE REPORT COMPONENTS
+// =========================================================
+
+const StatCard = ({
+  title,
+  value,
+  icon,
+  color = "success",
+  subtitle,
+}) => (
+  <div className="col-12 col-sm-6 col-xl-3">
+    <div className="card border-0 shadow-sm h-100">
+      <div className="card-body p-4">
+        <div className="d-flex justify-content-between align-items-start gap-3">
+          <div className="min-w-0">
+            <p className="text-muted small mb-2">{title}</p>
+            <h3 className="fw-bold mb-2 text-break">{value}</h3>
+            {subtitle && (
+              <small className="text-muted">{subtitle}</small>
+            )}
+          </div>
+          <div className={`rounded-3 bg-${color}-subtle text-${color} p-3`}>
+            <i className={`bi ${icon} fs-4`}></i>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+);
+
+const EmptyState = ({ icon, message }) => (
+  <div className="text-center text-muted py-5">
+    <i className={`bi ${icon} fs-1 d-block mb-3`}></i>
+    {message}
+  </div>
+);
+
 function Reports() {
 const [overview, setOverview] = useState(null);
 const [sales, setSales] = useState(null);
@@ -337,7 +375,15 @@ try {
 }, [startDate, endDate, branchId]);
 
 useEffect(() => {
-loadReports();
+  let cancelled = false;
+
+  Promise.resolve().then(() => {
+    if (!cancelled) loadReports();
+  });
+
+  return () => {
+    cancelled = true;
+  };
 }, [loadReports]);
 
 // =========================================================
@@ -524,40 +570,8 @@ const posUnknownCostSales = getValue(
 const posProfitComplete = posOverviewData?.profit_is_complete !== false;
 
 // =========================================================
-// REUSABLE COMPONENTS
+// REUSABLE REPORT DATA
 // =========================================================
-
-const StatCard = ({
-title,
-value,
-icon,
-color = "success",
-subtitle,
-}) => ( <div className="col-12 col-sm-6 col-xl-3"> <div className="card border-0 shadow-sm h-100"> <div className="card-body p-4"> <div className="d-flex justify-content-between align-items-start gap-3"> <div className="min-w-0"> <p className="text-muted small mb-2">{title}</p> <h3 className="fw-bold mb-2 text-break">{value}</h3>
-
-
-          {subtitle && (
-            <small className="text-muted">{subtitle}</small>
-          )}
-        </div>
-
-        <div
-          className={`rounded-3 bg-${color}-subtle text-${color} p-3`}
-        >
-          <i className={`bi ${icon} fs-4`}></i>
-        </div>
-      </div>
-    </div>
-  </div>
-</div>
-
-
-);
-
-const EmptyState = ({ icon, message }) => ( <div className="text-center text-muted py-5">
-<i className={`bi ${icon} fs-1 d-block mb-3`}></i>
-{message} </div>
-);
 
 const ReportTabs = [
 {
