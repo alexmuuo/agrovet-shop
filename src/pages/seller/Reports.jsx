@@ -12,6 +12,7 @@ const [posOverview, setPosOverview] = useState(null);
 const [posSales, setPosSales] = useState(null);
 const [posProducts, setPosProducts] = useState(null);
 const [branchReports, setBranchReports] = useState([]);
+const [availableBranches, setAvailableBranches] = useState([]);
 const [stockTransfers, setStockTransfers] = useState([]);
 const [branchId, setBranchId] = useState("");
 
@@ -270,6 +271,7 @@ try {
     api.get("/admin/stock-transfers", {
       params: branchId ? { branch_id: branchId, limit: 500 } : { limit: 500 },
     }),
+    api.get("/admin/branches"),
   ]);
 
   const posSetters = [
@@ -278,6 +280,7 @@ try {
     setPosProducts,
     setBranchReports,
     setStockTransfers,
+    setAvailableBranches,
   ];
 
   const posErrors = [];
@@ -295,6 +298,8 @@ try {
           );
         } else if (index === 4) {
           posSetters[index](getArray(data, "transfers", "items"));
+        } else if (index === 5) {
+          posSetters[index](getArray(data, "branches"));
         } else {
           posSetters[index](data);
         }
@@ -516,6 +521,7 @@ const posUnknownCostSales = getValue(
   "sales_with_unknown_cost",
   "unaccounted_cost_sales"
 );
+const posProfitComplete = posOverviewData?.profit_is_complete !== false;
 
 // =========================================================
 // REUSABLE COMPONENTS
@@ -746,11 +752,13 @@ Reports & Analytics </h2>
             onChange={(event) => setBranchId(event.target.value)}
           >
             <option value="">All branches</option>
-            {branchReports.map((branch, index) => (
-              <option key={branch.branch_id ?? branch.id ?? index} value={branch.branch_id ?? branch.id}>
-                {branch.branch_name ?? branch.name ?? `Branch ${index + 1}`}
-              </option>
-            ))}
+            {availableBranches
+              .filter((branch) => branch.is_active !== false)
+              .map((branch, index) => (
+                <option key={branch.id ?? index} value={branch.id}>
+                  {branch.name ?? `Branch ${index + 1}`}
+                </option>
+              ))}
           </select>
           <small className="text-muted">Applies to POS totals, products, transactions and Excel export. Website reports remain separate.</small>
         </div>
@@ -1502,11 +1510,19 @@ Reports & Analytics </h2>
           }
           icon="bi-box-seam"
           color="primary"
-          subtitle="Historical item buying prices"
+          subtitle={
+            posProfitComplete
+              ? "Historical item buying prices"
+              : "Known historical costs only"
+          }
         />
 
         <StatCard
-          title="POS Gross Profit"
+          title={
+            posProfitComplete
+              ? "POS Gross Profit"
+              : "POS Gross Profit (Partial)"
+          }
           value={
             posGrossProfit === null
               ? "Unavailable"
@@ -1514,6 +1530,11 @@ Reports & Analytics </h2>
           }
           icon="bi-graph-up-arrow"
           color="success"
+          subtitle={
+            posProfitComplete
+              ? "Historical batch and legacy costs"
+              : "Excludes items with unknown or invalid costs"
+          }
         />
 
         <StatCard
@@ -1525,6 +1546,11 @@ Reports & Analytics </h2>
           }
           icon="bi-percent"
           color="info"
+          subtitle={
+            posProfitComplete
+              ? "Based on known-cost items"
+              : "Based on known-cost items only"
+          }
         />
 
         <StatCard
@@ -1538,13 +1564,13 @@ Reports & Analytics </h2>
 
       {posCost === null ||
       posGrossProfit === null ||
-      posMargin === null ? (
+      posMargin === null ||
+      !posProfitComplete ? (
         <div className="alert alert-warning">
           <i className="bi bi-info-circle me-2"></i>
-          Some profitability figures were not returned by the
-          backend. The frontend does not guess missing costs or
-          profits. Confirm the POS overview response includes
-          total cost, gross profit, and profit margin.
+          {!posProfitComplete
+            ? "POS gross profit and margin are partial: they include only items with verified historical buying costs. Items with unknown or invalid cost records are excluded from those calculations. Sales revenue remains the full confirmed paid sale total."
+            : "Some profitability figures were not returned by the backend. The frontend does not guess missing costs or profits."}
         </div>
       ) : null}
 
@@ -1654,8 +1680,8 @@ Reports & Analytics </h2>
                     <th>Date</th>
                     <th>Transactions</th>
                     <th className="text-end">Sales (KES)</th>
-                    <th className="text-end">Gross Profit</th>
-                    <th className="text-end">Margin</th>
+                    <th className="text-end">Gross Profit (known costs)</th>
+                    <th className="text-end">Margin (known costs)</th>
                   </tr>
                 </thead>
 
@@ -1663,6 +1689,9 @@ Reports & Analytics </h2>
                   {posSalesList.map((item, index) => {
                     const itemProfit = getProfit(item);
                     const itemMargin = getMargin(item);
+                    const itemProfitComplete =
+                      item.profit_is_complete !== false &&
+                      item.cost_known !== false;
 
                     return (
                       <tr
@@ -1712,13 +1741,23 @@ Reports & Analytics </h2>
                         <td className="text-end">
                           {itemProfit === null
                             ? "Unavailable"
-                            : formatMoney(itemProfit)}
+                            : (
+                              <>
+                                {itemProfitComplete ? "" : "Partial: "}
+                                {formatMoney(itemProfit)}
+                              </>
+                            )}
                         </td>
 
                         <td className="text-end">
                           {itemMargin === null
                             ? "Unavailable"
-                            : formatPercent(itemMargin)}
+                            : (
+                              <>
+                                {itemProfitComplete ? "" : "Partial: "}
+                                {formatPercent(itemMargin)}
+                              </>
+                            )}
                         </td>
                       </tr>
                     );
@@ -1755,8 +1794,8 @@ Reports & Analytics </h2>
                     <th>Units Sold</th>
                     <th className="text-end">Sales Value</th>
                     <th className="text-end">Cost</th>
-                    <th className="text-end">Gross Profit</th>
-                    <th className="text-end">Margin</th>
+                    <th className="text-end">Gross Profit (known costs)</th>
+                    <th className="text-end">Margin (known costs)</th>
                   </tr>
                 </thead>
 
@@ -1772,6 +1811,10 @@ Reports & Analytics </h2>
 
                     const productProfit = getProfit(product);
                     const productMargin = getMargin(product);
+                    const productProfitComplete =
+                      product.profit_is_complete !== false &&
+                      product.cost_known !== false &&
+                      product.unknown_cost !== true;
 
                     return (
                       <tr
@@ -1823,13 +1866,23 @@ Reports & Analytics </h2>
                         <td className="text-end">
                           {productProfit === null
                             ? "Unavailable"
-                            : formatMoney(productProfit)}
+                            : (
+                              <>
+                                {productProfitComplete ? "" : "Partial: "}
+                                {formatMoney(productProfit)}
+                              </>
+                            )}
                         </td>
 
                         <td className="text-end">
                           {productMargin === null
                             ? "Unavailable"
-                            : formatPercent(productMargin)}
+                            : (
+                              <>
+                                {productProfitComplete ? "" : "Partial: "}
+                                {formatPercent(productMargin)}
+                              </>
+                            )}
                         </td>
                       </tr>
                     );
@@ -1882,8 +1935,8 @@ Reports & Analytics </h2>
                     <th className="text-end">Sales (KES)</th>
                     <th className="text-end">Paid Transactions</th>
                     <th className="text-end">Cost of Goods</th>
-                    <th className="text-end">Gross Profit</th>
-                    <th className="text-end">Margin</th>
+                    <th className="text-end">Gross Profit (known costs)</th>
+                    <th className="text-end">Margin (known costs)</th>
                   </tr>
                 </thead>
 
@@ -1899,6 +1952,10 @@ Reports & Analytics </h2>
 
                     const branchProfit = getProfit(branch);
                     const branchMargin = getMargin(branch);
+                    const branchProfitComplete =
+                      branch.profit_is_complete !== false &&
+                      branch.cost_known !== false &&
+                      branch.unknown_cost !== true;
 
                     return (
                       <tr
@@ -1958,13 +2015,23 @@ Reports & Analytics </h2>
                         <td className="text-end">
                           {branchProfit === null
                             ? "Unavailable"
-                            : formatMoney(branchProfit)}
+                            : (
+                              <>
+                                {branchProfitComplete ? "" : "Partial: "}
+                                {formatMoney(branchProfit)}
+                              </>
+                            )}
                         </td>
 
                         <td className="text-end">
                           {branchMargin === null
                             ? "Unavailable"
-                            : formatPercent(branchMargin)}
+                            : (
+                              <>
+                                {branchProfitComplete ? "" : "Partial: "}
+                                {formatPercent(branchMargin)}
+                              </>
+                            )}
                         </td>
                       </tr>
                     );
