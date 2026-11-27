@@ -17,6 +17,11 @@ from models.cashier_sale_payment import CashierSalePayment
 from models.stock_batch import StockBatch
 from models.stock_batch_allocation import StockBatchAllocation
 
+from services.stock_batch_admin_service import (
+    restore_sale_item_batches,
+    sale_items_have_batch_allocations,
+)
+
 from cashier_auth import cashier_required
 
 
@@ -1063,48 +1068,34 @@ def cancel_cashier_sale(sale_id):
         # RESTORE THE ORIGINAL BATCHES
         # ----------------------------------------------------
 
-        for item in sale.items:
-
-            allocations = db.session.execute(
-                select(StockBatchAllocation)
-                .where(
-                    StockBatchAllocation.sale_item_id == item.id
-                )
-                .with_for_update()
-            ).scalars().all()
-
-            if not allocations:
+        # Older pending sales may pre-date batch tracking. In that
+        # case restore only branch stock; do not invent batch history.
+        # New batch-aware sales restore their exact original batches
+        # through the shared idempotent service.
+        if sale_items_have_batch_allocations(list(sale.items)):
+            try:
+                batch_restore = restore_sale_item_batches(list(sale.items))
+            except ValueError as exc:
                 db.session.rollback()
+                return error_response(str(exc), 409)
 
+            if not batch_restore.get("restored"):
+                db.session.rollback()
                 return error_response(
-                    "Batch allocation records are missing for "
-                    "this sale. Automatic restoration was stopped.",
+                    batch_restore.get("message") or
+                    "Original stock batches could not be restored.",
                     409
                 )
-
-            for allocation in allocations:
-
-                batch = db.session.execute(
-                    select(StockBatch)
-                    .where(
-                        StockBatch.id == allocation.batch_id
-                    )
-                    .with_for_update()
-                ).scalar_one_or_none()
-
-                if not batch:
-                    db.session.rollback()
-
-                    return error_response(
-                        "An original stock batch could not be found. "
-                        "Automatic restoration was stopped.",
-                        409
-                    )
-
-                batch.remaining_quantity = (
-                    Decimal(str(batch.remaining_quantity))
-                    + Decimal(str(allocation.quantity))
-                ).quantize(QUANTITY_PLACES)
+        else:
+            batch_restore = {
+                "restored": True,
+                "allocation_count": 0,
+                "restored_quantity": Decimal("0.000"),
+                "message": (
+                    "Legacy sale had no batch allocation history; "
+                    "branch stock was restored without fabricating batches."
+                ),
+            }
 
         # ----------------------------------------------------
         # RESTORE BRANCH STOCK
