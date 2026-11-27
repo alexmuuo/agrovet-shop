@@ -66,6 +66,14 @@ class StockBatch(db.Model):
         nullable=False
     )
 
+    # False identifies legacy stock whose historical cost is unknown.
+    cost_is_known = db.Column(
+        db.Boolean,
+        nullable=False,
+        default=True,
+        server_default=db.true(),
+    )
+
     supplier_reference = db.Column(
         db.String(150),
         nullable=True
