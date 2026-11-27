@@ -76,6 +76,14 @@ class StockBatchAllocation(db.Model):
         nullable=False,
     )
 
+    # False means this allocation came from legacy stock with no verified BP.
+    cost_is_known = db.Column(
+        db.Boolean,
+        nullable=False,
+        default=True,
+        server_default=db.true(),
+    )
+
     created_at = db.Column(
         db.DateTime,
         nullable=False,
@@ -156,11 +164,16 @@ class StockBatchAllocation(db.Model):
             "batch_id": self.batch_id,
             "sale_item_id": self.sale_item_id,
             "quantity": float(self.quantity),
-            "buying_price": float(self.buying_price),
+            "buying_price": (
+                float(self.buying_price) if self.cost_is_known else None
+            ),
             "selling_price": float(self.selling_price),
             "revenue": float(self.revenue),
-            "cost": float(self.cost),
-            "gross_profit": float(self.gross_profit),
+            "cost": float(self.cost) if self.cost_is_known else None,
+            "gross_profit": (
+                float(self.gross_profit) if self.cost_is_known else None
+            ),
+            "cost_is_known": bool(self.cost_is_known),
             "created_at": (
                 self.created_at.isoformat()
                 if self.created_at else None

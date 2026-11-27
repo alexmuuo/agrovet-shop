@@ -66,6 +66,14 @@ class StockBatch(db.Model):
         nullable=False
     )
 
+    # False identifies legacy stock whose historical cost is unknown.
+    cost_is_known = db.Column(
+        db.Boolean,
+        nullable=False,
+        default=True,
+        server_default=db.true(),
+    )
+
     supplier_reference = db.Column(
         db.String(150),
         nullable=True
@@ -132,12 +140,14 @@ class StockBatch(db.Model):
             "remaining_quantity": float(
                 self.remaining_quantity or 0
             ),
-            "buying_price": float(
-                self.buying_price or 0
+            "buying_price": (
+                float(self.buying_price or 0)
+                if self.cost_is_known else None
             ),
             "selling_price": float(
                 self.selling_price or 0
             ),
+            "cost_is_known": bool(self.cost_is_known),
             "supplier_reference": self.supplier_reference,
             "reference": self.reference,
             "notes": self.notes,

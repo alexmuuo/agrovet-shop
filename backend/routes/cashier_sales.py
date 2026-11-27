@@ -17,6 +17,11 @@ from models.cashier_sale_payment import CashierSalePayment
 from models.stock_batch import StockBatch
 from models.stock_batch_allocation import StockBatchAllocation
 
+from services.stock_batch_admin_service import (
+    restore_sale_item_batches,
+    sale_items_have_batch_allocations,
+)
+
 from cashier_auth import cashier_required
 
 
@@ -241,13 +246,10 @@ def allocate_stock_from_batches(
             getattr(product, "price", None)
         )
 
-        if legacy_buying_price is None:
-            raise ValueError(
-                f"{product.name} has legacy stock without batch records, "
-                "but its catalogue buying price is missing. Add a buying "
-                "price before selling this legacy stock."
-            )
-
+        # Legacy stock has no verified receipt-level cost. Never treat
+        # the current catalogue BP as historical. A zero placeholder is
+        # stored only to satisfy the non-null batch schema; cost_is_known
+        # explicitly excludes it from COGS and profit calculations.
         if legacy_selling_price is None:
             raise ValueError(
                 f"{product.name} has legacy stock without batch records, "
@@ -265,17 +267,18 @@ def allocate_stock_from_batches(
             cashier_id=cashier_id,
             quantity_received=untracked_quantity,
             remaining_quantity=untracked_quantity,
-            buying_price=legacy_buying_price,
+            buying_price=legacy_buying_price or ZERO,
             selling_price=legacy_selling_price,
+            cost_is_known=False,
             supplier_reference=(
                 "LEGACY_CONVERSION;SOURCE:PRE_BATCH_BRANCH_STOCK;"
-                "PRICES:CATALOGUE_SNAPSHOT"
+                "COST:UNKNOWN"
             ),
             notes=(
                 "Legacy branch stock converted to batch tracking "
                 "during a cashier sale. Existing branch stock was "
-                "not increased. Buying and selling prices are "
-                "catalogue snapshots, not verified historical prices. "
+                "not increased. Historical buying cost is unknown; "
+                "the zero BP is a schema placeholder, not a cost. "
                 f"Conversion initiated by cashier #{cashier_id}."
             ),
         )
@@ -364,10 +367,13 @@ def allocate_stock_from_batches(
             buying_price=batch_buying_price,
             selling_price=batch_selling_price,
             revenue=allocation_revenue,
-            cost=cost,
-            gross_profit=money(
-                allocation_revenue - cost
-            )
+            cost=(cost if getattr(batch, "cost_is_known", True) else ZERO),
+            gross_profit=(
+                money(allocation_revenue - cost)
+                if getattr(batch, "cost_is_known", True)
+                else allocation_revenue
+            ),
+            cost_is_known=bool(getattr(batch, "cost_is_known", True))
         )
 
         db.session.add(allocation)
@@ -836,10 +842,15 @@ def create_cashier_sale():
                 ZERO
             )
 
-            if allocated_quantity > ZERO:
+            if allocated_quantity > ZERO and all(
+                bool(getattr(allocation, "cost_is_known", True))
+                for allocation in allocations
+            ):
                 sale_item.buying_price = money(
                     item_cost / allocated_quantity
                 )
+            else:
+                sale_item.buying_price = None
 
             if item["selling_unit"] == "unit":
                 sale_item.price = money(
@@ -1057,48 +1068,34 @@ def cancel_cashier_sale(sale_id):
         # RESTORE THE ORIGINAL BATCHES
         # ----------------------------------------------------
 
-        for item in sale.items:
-
-            allocations = db.session.execute(
-                select(StockBatchAllocation)
-                .where(
-                    StockBatchAllocation.sale_item_id == item.id
-                )
-                .with_for_update()
-            ).scalars().all()
-
-            if not allocations:
+        # Older pending sales may pre-date batch tracking. In that
+        # case restore only branch stock; do not invent batch history.
+        # New batch-aware sales restore their exact original batches
+        # through the shared idempotent service.
+        if sale_items_have_batch_allocations(list(sale.items)):
+            try:
+                batch_restore = restore_sale_item_batches(list(sale.items))
+            except ValueError as exc:
                 db.session.rollback()
+                return error_response(str(exc), 409)
 
+            if not batch_restore.get("restored"):
+                db.session.rollback()
                 return error_response(
-                    "Batch allocation records are missing for "
-                    "this sale. Automatic restoration was stopped.",
+                    batch_restore.get("message") or
+                    "Original stock batches could not be restored.",
                     409
                 )
-
-            for allocation in allocations:
-
-                batch = db.session.execute(
-                    select(StockBatch)
-                    .where(
-                        StockBatch.id == allocation.batch_id
-                    )
-                    .with_for_update()
-                ).scalar_one_or_none()
-
-                if not batch:
-                    db.session.rollback()
-
-                    return error_response(
-                        "An original stock batch could not be found. "
-                        "Automatic restoration was stopped.",
-                        409
-                    )
-
-                batch.remaining_quantity = (
-                    Decimal(str(batch.remaining_quantity))
-                    + Decimal(str(allocation.quantity))
-                ).quantize(QUANTITY_PLACES)
+        else:
+            batch_restore = {
+                "restored": True,
+                "allocation_count": 0,
+                "restored_quantity": Decimal("0.000"),
+                "message": (
+                    "Legacy sale had no batch allocation history; "
+                    "branch stock was restored without fabricating batches."
+                ),
+            }
 
         # ----------------------------------------------------
         # RESTORE BRANCH STOCK

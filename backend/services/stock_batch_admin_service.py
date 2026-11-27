@@ -1,4 +1,6 @@
+from datetime import datetime
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+import uuid
 
 from sqlalchemy import select
 
@@ -25,14 +27,17 @@ def to_quantity(value):
     return result
 
 
-def get_sale_item_allocations(sale_item_ids):
+def get_sale_item_allocations(sale_item_ids, *, lock=False):
     """
-    Retrieve batch allocations belonging to the supplied sale items.
+    Retrieve batch allocations for the supplied sale items.
+
+    When lock=True, lock the allocation rows so concurrent void
+    requests cannot restore the same allocation twice.
     """
     if not sale_item_ids:
         return []
 
-    return db.session.execute(
+    statement = (
         select(StockBatchAllocation)
         .where(
             StockBatchAllocation.sale_item_id.in_(
@@ -43,31 +48,22 @@ def get_sale_item_allocations(sale_item_ids):
             StockBatchAllocation.batch_id,
             StockBatchAllocation.id,
         )
-    ).scalars().all()
+    )
+
+    if lock:
+        statement = statement.with_for_update()
+
+    return db.session.execute(statement).scalars().all()
 
 
 def restore_sale_item_batches(sale_items):
     """
-    Restore the exact batches consumed by the supplied sale items.
+    Restore only allocations that have not already been restored.
 
-    This function does not commit. The calling route must commit
-    the batch restoration and its other inventory changes together.
-
-    Returns:
-        {
-            "restored": bool,
-            "allocation_count": int,
-            "restored_quantity": Decimal,
-            "message": str
-        }
-
-    Important:
-    - Does not delete allocation history.
-    - Does not modify BranchProductStock.
-    - Does not commit independently.
-    - Rejects inconsistent batch balances.
+    Batch balances, allocation restoration flags and the caller's
+    branch-stock update must be committed in one transaction.
+    This function never commits and never edits allocation history.
     """
-
     sale_item_ids = [
         item.id
         for item in sale_items
@@ -82,7 +78,7 @@ def restore_sale_item_batches(sale_items):
             "message": "No persisted sale items to restore.",
         }
 
-    allocations = get_sale_item_allocations(sale_item_ids)
+    allocations = get_sale_item_allocations(sale_item_ids, lock=True)
 
     if not allocations:
         return {
@@ -95,9 +91,53 @@ def restore_sale_item_batches(sale_items):
             ),
         }
 
+    # A batch-aware sale must have complete allocation coverage for
+    # every line. Never restore only some lines and then add the full
+    # sale quantity back to branch stock.
+    allocations_by_item = {}
+    for allocation in allocations:
+        allocations_by_item.setdefault(allocation.sale_item_id, Decimal("0.000"))
+        allocations_by_item[allocation.sale_item_id] += to_quantity(
+            allocation.quantity
+        )
+
+    for item in sale_items:
+        allocated_quantity = allocations_by_item.get(item.id)
+        if allocated_quantity is None:
+            raise ValueError(
+                "Batch allocation history is incomplete for this sale. "
+                "No inventory was changed; reconcile the sale first."
+            )
+        item_quantity = to_quantity(item.quantity)
+        if allocated_quantity != item_quantity:
+            raise ValueError(
+                "Batch allocation quantity does not match the sale item. "
+                "No inventory was changed; reconcile the sale first."
+            )
+
+    restored_count = sum(
+        1 for allocation in allocations
+        if bool(allocation.is_restored)
+    )
+    if restored_count:
+        # Mixed restoration state is corruption/partial prior work. Do
+        # not restore a subset while the route restores the full branch
+        # quantity; require reconciliation instead.
+        return {
+            "restored": False,
+            "allocation_count": 0,
+            "restored_quantity": Decimal("0.000"),
+            "message": (
+                "One or more allocations for this sale were already "
+                "restored. No inventory was changed; reconcile this sale."
+            ),
+        }
+
+    pending_allocations = allocations
+
     batch_ids = sorted({
         allocation.batch_id
-        for allocation in allocations
+        for allocation in pending_allocations
     })
 
     batches = db.session.execute(
@@ -107,85 +147,58 @@ def restore_sale_item_batches(sale_items):
         .with_for_update()
     ).scalars().all()
 
-    batches_by_id = {
-        batch.id: batch
-        for batch in batches
-    }
-
-    missing_batch_ids = [
-        batch_id
-        for batch_id in batch_ids
-        if batch_id not in batches_by_id
-    ]
-
-    if missing_batch_ids:
+    batches_by_id = {batch.id: batch for batch in batches}
+    if len(batches_by_id) != len(batch_ids):
         raise ValueError(
             "One or more original stock batches no longer exist. "
             "Batch restoration was cancelled."
         )
 
-    # Validate every allocation before changing any batch.
     quantities_by_batch = {}
-
-    for allocation in allocations:
-        allocated_quantity = to_quantity(
-            allocation.quantity
-        )
-
+    for allocation in pending_allocations:
+        allocated_quantity = to_quantity(allocation.quantity)
         if allocated_quantity <= 0:
-            raise ValueError(
-                "An invalid batch allocation was found."
-            )
-
+            raise ValueError("An invalid batch allocation was found.")
         quantities_by_batch[allocation.batch_id] = (
             quantities_by_batch.get(
                 allocation.batch_id,
                 Decimal("0.000"),
-            )
-            + allocated_quantity
+            ) + allocated_quantity
         )
 
-    # Validate that restoration will not exceed original receipts.
+    # Validate every batch before changing any balance or allocation flag.
     for batch_id, quantity_to_restore in quantities_by_batch.items():
         batch = batches_by_id[batch_id]
-
-        current_remaining = to_quantity(
-            batch.remaining_quantity
-        )
-
-        quantity_received = to_quantity(
-            batch.quantity_received
-        )
-
-        new_remaining = current_remaining + quantity_to_restore
-
-        if new_remaining > quantity_received:
+        current_remaining = to_quantity(batch.remaining_quantity)
+        quantity_received = to_quantity(batch.quantity_received)
+        if current_remaining + quantity_to_restore > quantity_received:
             raise ValueError(
-                f"Restoring batch {batch_id} would exceed "
-                "its original received quantity. "
-                "Inventory reconciliation is required."
+                f"Restoring batch {batch_id} would exceed its original "
+                "received quantity. Inventory reconciliation is required."
             )
 
-    # All checks passed. Restore the original batches.
+    restored_at = datetime.utcnow()
+    restoration_reference = f"VOID-{uuid.uuid4().hex[:16].upper()}"
     restored_quantity = Decimal("0.000")
 
     for batch_id, quantity_to_restore in quantities_by_batch.items():
         batch = batches_by_id[batch_id]
-
         batch.remaining_quantity = (
-            to_quantity(batch.remaining_quantity)
-            + quantity_to_restore
+            to_quantity(batch.remaining_quantity) + quantity_to_restore
         )
-
         restored_quantity += quantity_to_restore
+
+    for allocation in pending_allocations:
+        allocation.is_restored = True
+        allocation.restored_at = restored_at
+        allocation.restoration_reference = restoration_reference
 
     return {
         "restored": True,
-        "allocation_count": len(allocations),
+        "allocation_count": len(pending_allocations),
         "restored_quantity": to_quantity(restored_quantity),
-        "message": (
-            "Original stock batches restored successfully."
-        ),
+        "restoration_reference": restoration_reference,
+        "message": "Original stock batches restored successfully.",
     }
 
 
