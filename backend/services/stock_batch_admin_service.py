@@ -91,6 +91,30 @@ def restore_sale_item_batches(sale_items):
             ),
         }
 
+    # A batch-aware sale must have complete allocation coverage for
+    # every line. Never restore only some lines and then add the full
+    # sale quantity back to branch stock.
+    allocations_by_item = {}
+    for allocation in allocations:
+        allocations_by_item.setdefault(allocation.sale_item_id, Decimal("0.000"))
+        allocations_by_item[allocation.sale_item_id] += to_quantity(
+            allocation.quantity
+        )
+
+    for item in sale_items:
+        allocated_quantity = allocations_by_item.get(item.id)
+        if allocated_quantity is None:
+            raise ValueError(
+                "Batch allocation history is incomplete for this sale. "
+                "No inventory was changed; reconcile the sale first."
+            )
+        item_quantity = to_quantity(item.quantity)
+        if abs(allocated_quantity - item_quantity) > Decimal("0.001"):
+            raise ValueError(
+                "Batch allocation quantity does not match the sale item. "
+                "No inventory was changed; reconcile the sale first."
+            )
+
     restored_count = sum(
         1 for allocation in allocations
         if bool(allocation.is_restored)
