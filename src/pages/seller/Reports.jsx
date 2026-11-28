@@ -307,7 +307,11 @@ try {
     api.get("/admin/reports/pos/products", { params: posParams }),
     api.get("/admin/reports/pos/branches", { params: posParams }),
     api.get("/admin/stock-transfers", {
-      params: branchId ? { branch_id: branchId, limit: 500 } : { limit: 500 },
+      params: {
+        ...params,
+        ...(branchId ? { branch_id: branchId } : {}),
+        limit: 500,
+      },
     }),
     api.get("/admin/branches"),
   ]);
@@ -608,6 +612,11 @@ icon: "bi-shop",
 id: "branches",
 label: "Branch Reports",
 icon: "bi-diagram-3",
+},
+{
+id: "transfers",
+label: "Stock Transfers",
+icon: "bi-arrow-left-right",
 },
 ];
 
