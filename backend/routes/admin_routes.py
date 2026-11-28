@@ -5282,6 +5282,12 @@ def get_stock_transfers():
             "offset": offset
         }), 200
 
+    except ValueError as error:
+        return jsonify({
+            "status": "error",
+            "message": str(error)
+        }), 400
+
     except Exception:
         db.session.rollback()
         logger.exception("Failed to retrieve stock transfer history.")
