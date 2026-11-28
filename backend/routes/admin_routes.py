@@ -2817,7 +2817,7 @@ def get_pos_sale_reference(sale):
     }
 
 
-def get_pos_financial_summary(sales):
+def get_pos_financial_summary(sales, items=None):
     """
     Calculate POS revenue and profitability.
 
@@ -2859,7 +2859,10 @@ def get_pos_financial_summary(sales):
             sale.total
         )
 
-    items = get_pos_report_items(sales)
+    # Callers that already loaded sale items can pass them in to avoid
+    # repeating the same sale-item and batch-allocation query.
+    if items is None:
+        items = get_pos_report_items(sales)
 
     for item in items:
         if item.sale_id not in sale_ids:
@@ -3251,8 +3254,9 @@ def get_pos_product_report():
         }
 
         products = {}
+        report_items = get_pos_report_items(sales)
 
-        for item in get_pos_report_items(sales):
+        for item in report_items:
             if item.sale_id not in sale_ids:
                 continue
 
@@ -3383,7 +3387,7 @@ def get_pos_product_report():
             reverse=True
         )
 
-        summary = get_pos_financial_summary(sales)
+        summary = get_pos_financial_summary(sales, items=report_items)
 
         return jsonify({
             "status": "success",
@@ -5108,6 +5112,66 @@ def get_stock_transfers():
                 ).all()
             }
 
+        # Batch lineage used to be queried once for every transfer item.
+        # Fetch all potentially relevant transfer batches in one query, then
+        # match them to their transfer/item identity in memory.
+        expected_lineage_keys = set()
+        destination_branch_ids = set()
+        destination_product_ids = set()
+
+        for transfer in transfers:
+            if transfer.destination_branch_id is not None:
+                destination_branch_ids.add(transfer.destination_branch_id)
+
+            for transfer_item in (transfer.items or []):
+                source_product_id = getattr(transfer_item, "product_id", None)
+                destination_product_id = getattr(
+                    transfer_item, "destination_product_id", None
+                )
+                if destination_product_id is None:
+                    continue
+
+                destination_product_ids.add(destination_product_id)
+                expected_lineage_keys.add((
+                    transfer.destination_branch_id,
+                    destination_product_id,
+                    transfer.reference,
+                    source_product_id,
+                ))
+
+        lineage_batches_by_key = {}
+        if destination_branch_ids and destination_product_ids and expected_lineage_keys:
+            transfer_batches = StockBatch.query.filter(
+                StockBatch.branch_id.in_(destination_branch_ids),
+                StockBatch.product_id.in_(destination_product_ids),
+                StockBatch.supplier_reference.like("TRANSFER:%"),
+            ).order_by(StockBatch.id.asc()).all()
+
+            for batch in transfer_batches:
+                supplier_reference = str(batch.supplier_reference or "")
+                parts = supplier_reference.split(";")
+                if len(parts) < 2 or not parts[0].startswith("TRANSFER:"):
+                    continue
+                if not parts[1].startswith("SOURCE_PRODUCT_ID:"):
+                    continue
+
+                try:
+                    transfer_reference = parts[0][len("TRANSFER:"):]
+                    source_product_id = int(
+                        parts[1][len("SOURCE_PRODUCT_ID:"):]
+                    )
+                except (TypeError, ValueError):
+                    continue
+
+                key = (
+                    batch.branch_id,
+                    batch.product_id,
+                    transfer_reference,
+                    source_product_id,
+                )
+                if key in expected_lineage_keys:
+                    lineage_batches_by_key.setdefault(key, []).append(batch)
+
         serialized = []
 
         for transfer in transfers:
@@ -5197,21 +5261,16 @@ def get_stock_transfers():
                 # Newer transfers store source-batch lineage in the
                 # destination batch's supplier_reference. Do not make this
                 # lookup a prerequisite for returning the transfer itself.
-                lineage_batches = []
-                if destination_product_id is not None:
-                    lineage_batches = (
-                        StockBatch.query.filter(
-                            StockBatch.branch_id
-                            == transfer.destination_branch_id,
-                            StockBatch.product_id == destination_product_id,
-                            StockBatch.supplier_reference.like(
-                                f"TRANSFER:{transfer.reference};"
-                                f"SOURCE_PRODUCT_ID:{source_product_id};%"
-                            ),
-                        )
-                        .order_by(StockBatch.id.asc())
-                        .all()
-                    )
+                lineage_key = (
+                    transfer.destination_branch_id,
+                    destination_product_id,
+                    transfer.reference,
+                    source_product_id,
+                )
+                lineage_batches = lineage_batches_by_key.get(
+                    lineage_key,
+                    [],
+                )
 
                 batch_transfers = []
                 for batch in lineage_batches:
