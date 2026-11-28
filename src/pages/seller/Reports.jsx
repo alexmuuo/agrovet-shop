@@ -285,6 +285,7 @@ try {
         websiteErrors.push(err.message);
       }
     } else {
+      websiteSetters[index](null);
       websiteErrors.push(
         result.reason?.response?.data?.message ||
           result.reason?.message ||
@@ -307,7 +308,11 @@ try {
     api.get("/admin/reports/pos/products", { params: posParams }),
     api.get("/admin/reports/pos/branches", { params: posParams }),
     api.get("/admin/stock-transfers", {
-      params: branchId ? { branch_id: branchId, limit: 500 } : { limit: 500 },
+      params: {
+        ...params,
+        ...(branchId ? { branch_id: branchId } : {}),
+        limit: 500,
+      },
     }),
     api.get("/admin/branches"),
   ]);
@@ -345,6 +350,11 @@ try {
         posErrors.push(err.message);
       }
     } else {
+      if (index === 3 || index === 4 || index === 5) {
+        posSetters[index]([]);
+      } else {
+        posSetters[index](null);
+      }
       posErrors.push(
         result.reason?.response?.data?.message ||
           result.reason?.message ||
@@ -355,9 +365,7 @@ try {
 
   if (posErrors.length) {
     console.error("POS reports:", posErrors);
-    setPosError(
-      "Some POS reports could not be loaded. Check the backend response and the browser console."
-    );
+    setPosError(posErrors.join(" "));
   }
 } catch (err) {
   console.error("Reports loading error:", err);
@@ -608,6 +616,11 @@ icon: "bi-shop",
 id: "branches",
 label: "Branch Reports",
 icon: "bi-diagram-3",
+},
+{
+id: "transfers",
+label: "Stock Transfers",
+icon: "bi-arrow-left-right",
 },
 ];
 
