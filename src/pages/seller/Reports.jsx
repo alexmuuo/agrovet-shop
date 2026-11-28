@@ -285,6 +285,7 @@ try {
         websiteErrors.push(err.message);
       }
     } else {
+      websiteSetters[index](null);
       websiteErrors.push(
         result.reason?.response?.data?.message ||
           result.reason?.message ||
@@ -349,6 +350,11 @@ try {
         posErrors.push(err.message);
       }
     } else {
+      if (index === 3 || index === 4 || index === 5) {
+        posSetters[index]([]);
+      } else {
+        posSetters[index](null);
+      }
       posErrors.push(
         result.reason?.response?.data?.message ||
           result.reason?.message ||
@@ -359,9 +365,7 @@ try {
 
   if (posErrors.length) {
     console.error("POS reports:", posErrors);
-    setPosError(
-      "Some POS reports could not be loaded. Check the backend response and the browser console."
-    );
+    setPosError(posErrors.join(" "));
   }
 } catch (err) {
   console.error("Reports loading error:", err);
