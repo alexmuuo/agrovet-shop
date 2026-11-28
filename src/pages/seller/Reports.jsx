@@ -487,9 +487,14 @@ useEffect(() => {
 }, []);
 
 useEffect(() => {
-  loadReports();
+  let cancelled = false;
+
+  Promise.resolve().then(() => {
+    if (!cancelled) loadReports();
+  });
 
   return () => {
+    cancelled = true;
     activeReportRequestRef.current?.abort();
   };
 }, [loadReports]);
