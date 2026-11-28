@@ -36,6 +36,9 @@ from models.cashier_sale import CashierSale, CashierSaleItem
 from models.cashier_sale_payment import CashierSalePayment
 from models.stock_batch import StockBatch
 from models.stock_batch_allocation import StockBatchAllocation
+from services.stock_batch_service import (
+    reconcile_batch_balances_to_branch_stock,
+)
 
 from admin_auth import admin_required
 
@@ -2052,6 +2055,32 @@ def update_branch_stock_admin(
         else:
             stock.quantity = quantity
 
+        # Lock the corresponding batch balances and keep them aligned with
+        # the branch stock value. Reductions consume the newest remaining
+        # batches first; original receipt quantities and BP/SP are untouched.
+        stock_batches = db.session.execute(
+            select(StockBatch)
+            .where(
+                StockBatch.branch_id == branch_id,
+                StockBatch.product_id == product_id,
+                StockBatch.remaining_quantity > Decimal("0.000"),
+            )
+            .order_by(
+                StockBatch.created_at.asc(),
+                StockBatch.id.asc(),
+            )
+            .with_for_update()
+        ).scalars().all()
+
+        batch_reconciliation = reconcile_batch_balances_to_branch_stock(
+            stock_batches,
+            quantity,
+            branch_id=branch_id,
+            product_id=product_id,
+            product_name=product.name,
+            reason="ADMIN_BRANCH_STOCK_EDIT",
+        )
+
         db.session.commit()
 
         saved_quantity = float(stock.quantity)
@@ -2062,6 +2091,24 @@ def update_branch_stock_admin(
             "branch_id": branch_id,
             "product_id": product_id,
             "quantity": saved_quantity,
+            "batch_reconciliation": {
+                "adjusted": batch_reconciliation["adjusted"],
+                "adjusted_batch_count": len(
+                    batch_reconciliation["adjusted_batches"]
+                ),
+                "quantity_removed": float(
+                    batch_reconciliation["quantity_removed"]
+                ),
+                "batch_quantity_before": float(
+                    batch_reconciliation["batch_quantity_before"]
+                ),
+                "batch_quantity_after": float(
+                    batch_reconciliation["batch_quantity_after"]
+                ),
+                "untracked_stock_quantity": float(
+                    batch_reconciliation["untracked_stock_quantity"]
+                ),
+            },
         }), 200
 
     except IntegrityError:

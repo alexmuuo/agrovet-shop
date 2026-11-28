@@ -175,17 +175,24 @@ function Branches() {
       if (!selectedBranchId || !productId) throw new Error("A branch and product must be selected.");
       const quantity = Number(text);
       if (!Number.isFinite(quantity) || quantity < 0) throw new Error("Enter a valid stock quantity.");
-      await api.put(`/admin/branches/${selectedBranchId}/stock/${productId}`, { quantity });
+      const response = await api.put(
+        `/admin/branches/${selectedBranchId}/stock/${productId}`,
+        { quantity }
+      );
+      const reconciliation = response?.data?.batch_reconciliation;
+      const reconciliationMessage = reconciliation?.adjusted
+        ? ` Batch balances reconciled: ${Number(reconciliation.quantity_removed || 0).toFixed(3)} units removed from ${reconciliation.adjusted_batch_count} newer batch(es).`
+        : "";
 
       setStockEdits((previous) => {
         const next = { ...previous };
         delete next[productId];
         return next;
       });
-      setSuccess(`Stock updated for ${product.name}.`);
+      setSuccess(`Stock updated for ${product.name}.${reconciliationMessage}`);
 
-      const response = await api.get(`/admin/branches/${selectedBranchId}/stock`);
-      setStock(getList(response, "stock"));
+      const stockResponse = await api.get(`/admin/branches/${selectedBranchId}/stock`);
+      setStock(getList(stockResponse, "stock"));
     } catch (err) {
       setError(`Unable to update stock: ${getErrorMessage(err)}`);
     } finally {
