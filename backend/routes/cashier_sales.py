@@ -21,6 +21,9 @@ from services.stock_batch_admin_service import (
     restore_sale_item_batches,
     sale_items_have_batch_allocations,
 )
+from services.stock_batch_service import (
+    reconcile_batch_balances_to_branch_stock,
+)
 
 from cashier_auth import cashier_required
 
@@ -209,11 +212,16 @@ def allocate_stock_from_batches(
         QUANTITY_PLACES
     )
 
-    if available > branch_available:
-        raise ValueError(
-            f"Batch records for {product.name} exceed its branch stock. "
-            "Stock reconciliation is required before this sale."
-        )
+    reconciliation = reconcile_batch_balances_to_branch_stock(
+        batches,
+        branch_available,
+        branch_id=branch_id,
+        product_id=product.id,
+        product_name=product.name,
+        reason="CASHIER_SALE_PRECHECK",
+    )
+    available = reconciliation["batch_quantity_after"]
+
 
     if available < required_quantity:
         if branch_available < required_quantity:
@@ -221,12 +229,6 @@ def allocate_stock_from_batches(
                 f"Insufficient branch stock for {product.name}. "
                 f"Available: {branch_available:.3f}; "
                 f"required: {required_quantity:.3f}."
-            )
-
-        if available > branch_available:
-            raise ValueError(
-                f"Batch records for {product.name} exceed its branch stock. "
-                "Stock reconciliation is required before this sale."
             )
 
         untracked_quantity = (
@@ -771,6 +773,7 @@ def create_cashier_sale():
         # ----------------------------------------------------
 
         total = ZERO
+        allocated_quantity_by_product = {}
 
         for item in validated_items:
 
@@ -793,6 +796,15 @@ def create_cashier_sale():
             db.session.add(sale_item)
             db.session.flush()
 
+            already_allocated = allocated_quantity_by_product.get(
+                product.id,
+                ZERO,
+            )
+            remaining_branch_stock = (
+                Decimal(str(item["stock"].quantity))
+                - already_allocated
+            ).quantize(QUANTITY_PLACES)
+
             allocations = allocate_stock_from_batches(
                 sale_item=sale_item,
                 branch_id=branch.id,
@@ -805,9 +817,13 @@ def create_cashier_sale():
                     if item["price"] is not None
                     else ZERO
                 ),
-                branch_stock_quantity=item["stock"].quantity,
+                branch_stock_quantity=remaining_branch_stock,
                 cashier_id=cashier.id
             )
+
+            allocated_quantity_by_product[product.id] = (
+                already_allocated + item["stock_quantity"]
+            ).quantize(QUANTITY_PLACES)
 
             # -----------------------------------------------
             # CALCULATE ITEM REVENUE AND COST FROM ALLOCATIONS
