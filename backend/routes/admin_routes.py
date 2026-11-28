@@ -5045,16 +5045,19 @@ def get_stock_transfers():
     legacy transfers remain visible with an empty batch_transfers list.
     """
     try:
+        # Transfer history shares the report date semantics: the selected
+        # end date is inclusive to the user and exclusive in the SQL query.
+        start_date, end_date = parse_report_dates()
+        branch_id = get_report_branch_id()
         query = StockTransfer.query
-        branch_id = request.args.get("branch_id", type=int)
+
+        if start_date:
+            query = query.filter(StockTransfer.created_at >= start_date)
+
+        if end_date:
+            query = query.filter(StockTransfer.created_at < end_date)
 
         if branch_id is not None:
-            if branch_id <= 0:
-                return jsonify({
-                    "status": "error",
-                    "message": "Invalid branch ID."
-                }), 400
-
             query = query.filter(or_(
                 StockTransfer.source_branch_id == branch_id,
                 StockTransfer.destination_branch_id == branch_id
