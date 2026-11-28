@@ -191,8 +191,8 @@ function Branches() {
       });
       setSuccess(`Stock updated for ${product.name}.${reconciliationMessage}`);
 
-      const response = await api.get(`/admin/branches/${selectedBranchId}/stock`);
-      setStock(getList(response, "stock"));
+      const stockResponse = await api.get(`/admin/branches/${selectedBranchId}/stock`);
+      setStock(getList(stockResponse, "stock"));
     } catch (err) {
       setError(`Unable to update stock: ${getErrorMessage(err)}`);
     } finally {
