@@ -24,7 +24,10 @@ const cleanUrl = url.split("?")[0];
 // ADMIN AUTHENTICATION
 // ========================================================
 
-const isAdminRoute = cleanUrl.startsWith("/admin/");
+// The login endpoint is public. Do not attach an expired token to it.
+const isAdminLogin = cleanUrl === "/admin/login" && method === "post";
+const isAdminRoute =
+  cleanUrl.startsWith("/admin/") && !isAdminLogin;
 
 // Product creation, editing, and deletion require admin auth.
 const isProductMutation =
@@ -123,3 +126,45 @@ return config;
 );
 
 export default api;
+
+
+// ============================================================
+// RESPONSE INTERCEPTOR
+// EXPIRE INVALID ADMIN SESSIONS CLEANLY
+// ============================================================
+
+// Admin tokens are time-limited by the Flask backend. A token can remain
+// in localStorage after it expires, so the route guard alone cannot tell
+// whether the session is still valid. Redirect on the first protected
+// admin 401 instead of leaving the dashboard full of empty report cards.
+let redirectingExpiredAdminSession = false;
+
+api.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    const status = error?.response?.status;
+    const requestUrl = String(error?.config?.url || "").split("?")[0];
+    const isAdminApiRequest =
+      requestUrl.startsWith("/admin/") &&
+      requestUrl !== "/admin/login";
+
+    if (
+      status === 401 &&
+      isAdminApiRequest &&
+      typeof window !== "undefined"
+    ) {
+      localStorage.removeItem("adminToken");
+      localStorage.removeItem("admin");
+
+      if (
+        window.location.pathname !== "/admin-login" &&
+        !redirectingExpiredAdminSession
+      ) {
+        redirectingExpiredAdminSession = true;
+        window.location.replace("/admin-login?reason=session-expired");
+      }
+    }
+
+    return Promise.reject(error);
+  }
+);
