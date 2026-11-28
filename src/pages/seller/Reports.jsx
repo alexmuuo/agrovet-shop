@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import api from "../../api/api";
 
 // =========================================================
@@ -63,6 +63,8 @@ const [posError, setPosError] = useState("");
 const [exportingExcel, setExportingExcel] = useState(false);
 
 const [activeReport, setActiveReport] = useState("overview");
+const activeReportRequestRef = useRef(null);
+const [branchLoadError, setBranchLoadError] = useState("");
 
 // =========================================================
 // HELPERS
@@ -244,143 +246,245 @@ item?.id ??
 
 // =========================================================
 // LOAD REPORTS
-// Website and POS requests remain separate.
+// Fetch only the data required by the currently selected report.
+// This avoids making every reporting endpoint compete for the same
+// Render worker and database connection pool on every page visit.
 // =========================================================
 
 const loadReports = useCallback(async () => {
-setLoading(true);
-setError("");
-setPosError("");
-
-
-const params = {};
-
-if (startDate) params.start_date = startDate;
-if (endDate) params.end_date = endDate;
-
-try {
-  const websiteRequests = await Promise.allSettled([
-    api.get("/admin/reports/overview", { params }),
-    api.get("/admin/reports/sales", { params }),
-    api.get("/admin/reports/products", { params }),
-    api.get("/admin/reports/deliveries", { params }),
-    api.get("/admin/reports/profit", { params }),
-  ]);
-
-  const websiteSetters = [
-    setOverview,
-    setSales,
-    setProducts,
-    setDeliveries,
-    setProfit,
-  ];
-
-  const websiteErrors = [];
-
-  websiteRequests.forEach((result, index) => {
-    if (result.status === "fulfilled") {
-      try {
-        websiteSetters[index](extractData(result.value));
-      } catch (err) {
-        websiteErrors.push(err.message);
-      }
-    } else {
-      websiteSetters[index](null);
-      websiteErrors.push(
-        result.reason?.response?.data?.message ||
-          result.reason?.message ||
-          "A website report could not be loaded."
-      );
-    }
-  });
-
-  if (websiteErrors.length) {
-    console.error("Website reports:", websiteErrors);
-    setError(websiteErrors[0]);
+  if (activeReportRequestRef.current) {
+    activeReportRequestRef.current.abort();
   }
 
-  const posParams = { ...params };
-  if (branchId) posParams.branch_id = branchId;
+  const controller = new AbortController();
+  activeReportRequestRef.current = controller;
 
-  const posRequests = await Promise.allSettled([
-    api.get("/admin/reports/pos/overview", { params: posParams }),
-    api.get("/admin/reports/pos/sales", { params: posParams }),
-    api.get("/admin/reports/pos/products", { params: posParams }),
-    api.get("/admin/reports/pos/branches", { params: posParams }),
-    api.get("/admin/stock-transfers", {
-      params: {
-        ...params,
-        ...(branchId ? { branch_id: branchId } : {}),
-        limit: 500,
+  setLoading(true);
+  setError("");
+  setPosError("");
+
+  const params = {};
+  if (startDate) params.start_date = startDate;
+  if (endDate) params.end_date = endDate;
+
+  const posParams = {
+    ...params,
+    ...(branchId ? { branch_id: branchId } : {}),
+  };
+
+  const requestPlans = {
+    overview: [
+      {
+        label: "Website overview",
+        url: "/admin/reports/overview",
+        params,
+        apply: setOverview,
       },
-    }),
-    api.get("/admin/branches"),
-  ]);
-
-  const posSetters = [
-    setPosOverview,
-    setPosSales,
-    setPosProducts,
-    setBranchReports,
-    setStockTransfers,
-    setAvailableBranches,
-  ];
-
-  const posErrors = [];
-
-  posRequests.forEach((result, index) => {
-    if (result.status === "fulfilled") {
-      try {
-        const data = extractData(result.value);
-
-        if (index === 3) {
-          posSetters[index](
+      {
+        label: "Website sales summary",
+        url: "/admin/reports/sales",
+        params,
+        apply: setSales,
+      },
+      {
+        label: "Website delivery summary",
+        url: "/admin/reports/deliveries",
+        params,
+        apply: setDeliveries,
+      },
+    ],
+    sales: [
+      {
+        label: "Website sales report",
+        url: "/admin/reports/sales",
+        params,
+        apply: setSales,
+      },
+    ],
+    products: [
+      {
+        label: "Website products report",
+        url: "/admin/reports/products",
+        params,
+        apply: setProducts,
+      },
+    ],
+    deliveries: [
+      {
+        label: "Website deliveries report",
+        url: "/admin/reports/deliveries",
+        params,
+        apply: setDeliveries,
+      },
+    ],
+    profit: [
+      {
+        label: "Website profit report",
+        url: "/admin/reports/profit",
+        params,
+        apply: setProfit,
+      },
+    ],
+    pos: [
+      {
+        label: "POS overview",
+        url: "/admin/reports/pos/overview",
+        params: posParams,
+        apply: setPosOverview,
+      },
+      {
+        label: "POS sales report",
+        url: "/admin/reports/pos/sales",
+        params: posParams,
+        apply: setPosSales,
+      },
+      {
+        label: "POS products report",
+        url: "/admin/reports/pos/products",
+        params: posParams,
+        apply: setPosProducts,
+      },
+    ],
+    branches: [
+      {
+        label: "POS branch report",
+        url: "/admin/reports/pos/branches",
+        params: posParams,
+        apply: (data) => {
+          setBranchReports(
             Array.isArray(data)
               ? data
               : getArray(data, "branches", "reports", "items")
           );
-        } else if (index === 4) {
-          posSetters[index](getArray(data, "transfers", "items"));
-        } else if (index === 5) {
-          posSetters[index](getArray(data, "branches"));
-        } else {
-          posSetters[index](data);
+        },
+        onError: () => setBranchReports([]),
+      },
+    ],
+    transfers: [
+      {
+        label: "Stock transfer history",
+        url: "/admin/stock-transfers",
+        params: { ...posParams, limit: 100 },
+        apply: (data) => setStockTransfers(getArray(data, "transfers", "items")),
+        onError: () => setStockTransfers([]),
+      },
+    ],
+  };
+
+  const requests = requestPlans[activeReport] || [];
+  const isPosReport = ["pos", "branches", "transfers"].includes(activeReport);
+  const errors = [];
+
+  try {
+    const results = await Promise.allSettled(
+      requests.map((request) =>
+        api.get(request.url, {
+          params: request.params,
+          signal: controller.signal,
+        })
+      )
+    );
+
+    if (controller.signal.aborted) return;
+
+    results.forEach((result, index) => {
+      const request = requests[index];
+
+      if (result.status === "fulfilled") {
+        try {
+          request.apply(extractData(result.value));
+        } catch (error) {
+          const detail = error?.message || "The response could not be processed.";
+          errors.push(`${request.label} (${request.url}): ${detail}`);
+          request.onError?.();
         }
-      } catch (err) {
-        posErrors.push(err.message);
+        return;
       }
-    } else {
-      if (index === 3 || index === 4 || index === 5) {
-        posSetters[index]([]);
-      } else {
-        posSetters[index](null);
+
+      const reason = result.reason;
+      if (
+        reason?.code === "ERR_CANCELED" ||
+        reason?.name === "CanceledError"
+      ) {
+        return;
       }
-      posErrors.push(
-        result.reason?.response?.data?.message ||
-          result.reason?.message ||
-          "A POS report could not be loaded."
+
+      const status = reason?.response?.status;
+      const code = reason?.code;
+      const detail =
+        reason?.response?.data?.message ||
+        reason?.message ||
+        "The request failed.";
+
+      const requestIdentity = [
+        request.label,
+        request.url,
+        status ? `HTTP ${status}` : code,
+      ].filter(Boolean).join(" | ");
+
+      errors.push(`${requestIdentity}: ${detail}`);
+      request.onError?.();
+      if (!request.onError) request.apply(null);
+    });
+
+    if (errors.length) {
+      console.error(
+        `Report requests failed for "${activeReport}":`,
+        errors
       );
+      if (isPosReport) {
+        setPosError(errors.join(" "));
+      } else {
+        setError(errors.join(" "));
+      }
     }
-  });
-
-  if (posErrors.length) {
-    console.error("POS reports:", posErrors);
-    setPosError(posErrors.join(" "));
+  } catch (error) {
+    if (
+      !controller.signal.aborted &&
+      error?.code !== "ERR_CANCELED" &&
+      error?.name !== "CanceledError"
+    ) {
+      const message = error?.message || "Could not load the selected report.";
+      if (isPosReport) setPosError(message);
+      else setError(message);
+    }
+  } finally {
+    if (activeReportRequestRef.current === controller) {
+      activeReportRequestRef.current = null;
+      setLoading(false);
+    }
   }
-} catch (err) {
-  console.error("Reports loading error:", err);
+}, [activeReport, startDate, endDate, branchId]);
 
-  setError(
-    err?.response?.data?.message ||
-      err?.message ||
-      "Could not load reports."
-  );
-} finally {
-  setLoading(false);
-}
+// Branch choices are small reference data. Fetch them once rather than
+// repeating the same request whenever a report or date filter changes.
+useEffect(() => {
+  const controller = new AbortController();
 
+  api.get("/admin/branches", { signal: controller.signal })
+    .then((response) => {
+      const data = response?.data;
+      if (data?.status === "error") {
+        throw new Error(data.message || "Could not load branches.");
+      }
+      const branches = data?.branches;
+      setAvailableBranches(Array.isArray(branches) ? branches : []);
+    })
+    .catch((error) => {
+      if (
+        error?.code !== "ERR_CANCELED" &&
+        error?.name !== "CanceledError"
+      ) {
+        setBranchLoadError(
+          error?.response?.data?.message ||
+          error?.message ||
+          "Could not load the branch list."
+        );
+      }
+    });
 
-}, [startDate, endDate, branchId]);
+  return () => controller.abort();
+}, []);
 
 useEffect(() => {
   let cancelled = false;
@@ -391,10 +495,10 @@ useEffect(() => {
 
   return () => {
     cancelled = true;
+    activeReportRequestRef.current?.abort();
   };
 }, [loadReports]);
 
-// =========================================================
 // EXPORT POS REPORTS TO EXCEL
 // Uses the selected date filters and exports cashier POS data only.
 // =========================================================
@@ -412,6 +516,7 @@ const exportPosReportsToExcel = async () => {
     const response = await api.get("/admin/reports/pos/export.xlsx", {
       params,
       responseType: "blob",
+      timeout: 120000,
     });
 
     const blob = new Blob([response.data], {
@@ -788,6 +893,7 @@ Reports & Analytics </h2>
               ))}
           </select>
           <small className="text-muted">Applies to POS totals, products, transactions and Excel export. Website reports remain separate.</small>
+          {branchLoadError && <small className="text-danger d-block">{branchLoadError}</small>}
         </div>
       </div>
     </div>
@@ -2081,12 +2187,18 @@ Reports & Analytics </h2>
 
   {activeReport === "transfers" && (
     <>
+      {posError && (
+        <div className="alert alert-warning" role="alert">
+          <i className="bi bi-exclamation-triangle me-2"></i>
+          {posError}
+        </div>
+      )}
       <div className="alert alert-info">
         <i className="bi bi-info-circle me-2"></i>
         Interbranch transfers are inventory movements, not sales. They change stock quantities and branch-level stock valuation, but must not add revenue, COGS or gross profit. Batch cost and selling-price history should be preserved by the backend transfer workflow.
       </div>
       <div className="row g-3 mb-4">
-        <StatCard title="Transfers listed" value={formatNumber(stockTransfers.length)} icon="bi-arrow-left-right" color="primary" subtitle="Up to 500 most recent transfers" />
+        <StatCard title="Transfers listed" value={formatNumber(stockTransfers.length)} icon="bi-arrow-left-right" color="primary" subtitle="Latest 100 transfers" />
         <StatCard title="Units transferred" value={formatNumber(stockTransfers.reduce((sum, transfer) => sum + Number(transfer.total_quantity ?? transfer.quantity ?? (transfer.items || []).reduce((n, item) => n + Number(item.quantity || 0), 0)), 0))} icon="bi-box-seam" color="success" subtitle="Quantity across listed transfer records" />
       </div>
       <div className="card border-0 shadow-sm">
