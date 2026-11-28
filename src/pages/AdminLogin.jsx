@@ -8,7 +8,12 @@ function AdminLogin() {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
-  const [error, setError] = useState("");
+  const [error, setError] = useState(() => {
+    const reason = new URLSearchParams(window.location.search).get("reason");
+    return reason === "session-expired"
+      ? "Your admin session expired. Please log in again to continue."
+      : "";
+  });
   const [loading, setLoading] = useState(false);
 
   const handleLogin = async (event) => {
